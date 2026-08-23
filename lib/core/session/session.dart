@@ -154,9 +154,22 @@ class Session extends ChangeNotifier {
     await _storage.write(key: _userKey, value: jsonEncode(user.toJson()));
   }
 
+  /// Called on sign-out, so other stores can drop their state.
+  ///
+  /// A plain callback list rather than an import of every store — Session sits
+  /// under core and must not depend on features above it.
+  final List<VoidCallback> _onSignOut = [];
+
+  void onSignOut(VoidCallback callback) => _onSignOut.add(callback);
+
   Future<void> signOut() async {
     _token = null;
     _user = null;
+
+    for (final callback in _onSignOut) {
+      callback();
+    }
+
     notifyListeners();
 
     await _storage.delete(key: _tokenKey);

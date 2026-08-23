@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/session/session.dart';
+import '../../../core/session/session_sync.dart';
+import '../../../core/widgets/app_toast.dart';
+import '../../safety/state/safety_store.dart';
 import '../../../core/theme/app_colors.dart';
 import 'widgets/check_in_card.dart';
 import 'widgets/family_strip.dart';
@@ -24,7 +27,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  bool _checkedIn = false;
 
   // Placeholder until the circles endpoint exists.
   static const _family = <FamilyMember>[
@@ -33,9 +35,36 @@ class _HomeScreenState extends State<HomeScreen> {
     FamilyMember(name: 'Sister', status: 'All Safe'),
   ];
 
+  @override
+  void initState() {
+    super.initState();
+
+    // Avatar links are signed and expire, so the copy restored from secure
+    // storage goes stale. Re-read the user in the background rather than
+    // showing the initials fallback to somebody who has a photo set.
+    syncSession();
+    SafetyStore.instance.load();
+  }
+
+  /// Mark today safe.
+  ///
+  /// The store repaints both cards optimistically before the request
+  /// leaves, so the only thing left to do here is report the outcome.
+  Future<void> _checkIn() async {
+    final outcome = await SafetyStore.instance.checkIn();
+
+    if (!mounted || outcome.message == null) return;
+
+    AppToast.show(
+      context,
+      outcome.message!,
+      type: outcome.ok ? ToastType.success : ToastType.error,
+    );
+  }
+
   Future<void> _refresh() async {
-    // TODO: GET /api/v1/me and the circle summary.
-    await Future<void>.delayed(const Duration(milliseconds: 600));
+    // TODO: the circle summary, once that endpoint exists.
+    await Future.wait([syncSession(), SafetyStore.instance.load()]);
   }
 
   @override
@@ -44,7 +73,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // is restored or refreshed, not only if it happened to be there on the
     // very first build.
     return AnimatedBuilder(
-      animation: Session.instance,
+      animation: Listenable.merge([Session.instance, SafetyStore.instance]),
       builder: (context, _) => _build(context),
     );
   }
@@ -83,15 +112,19 @@ class _HomeScreenState extends State<HomeScreen> {
               _Greeting(name: user?.firstName ?? 'there'),
               const SizedBox(height: 18),
 
-              const SafetyStatusCard(),
+              SafetyStatusCard(
+                status: SafetyStore.instance.status,
+                loading: SafetyStore.instance.loading,
+              ),
               const SizedBox(height: 14),
 
               const QuickActions(),
               const SizedBox(height: 14),
 
               CheckInCard(
-                checkedIn: _checkedIn,
-                onCheckIn: () => setState(() => _checkedIn = true),
+                info: SafetyStore.instance.status?.checkIn,
+                submitting: SafetyStore.instance.submitting,
+                onCheckIn: _checkIn,
               ),
               const SizedBox(height: 24),
 
