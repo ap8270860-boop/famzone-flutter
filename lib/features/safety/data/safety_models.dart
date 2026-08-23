@@ -49,7 +49,8 @@ class CheckInInfo {
     required this.overdue,
     required this.currentStreak,
     required this.longestStreak,
-    this.checkedInLabel,
+    this.checkedInAt,
+    this.serverCheckedInLabel,
     this.reminderLabel,
     this.note,
     this.recent = const [],
@@ -60,9 +61,31 @@ class CheckInInfo {
   final int currentStreak;
   final int longestStreak;
 
-  /// Pre-formatted by the server in the user's own timezone, e.g. "9:14 AM".
-  final String? checkedInLabel;
+  /// The instant the check-in happened, in UTC.
+  ///
+  /// Formatting happens on the device rather than trusting the server's
+  /// pre-rendered label, so the time shown is always the phone's own — right
+  /// even if the stored zone is briefly stale, and right the moment somebody
+  /// steps off a plane.
+  final DateTime? checkedInAt;
+
+  /// The server's rendering, kept as a fallback for when [checkedInAt] is
+  /// missing and used as-is by the web dashboard.
+  final String? serverCheckedInLabel;
+
   final String? reminderLabel;
+
+  /// "7:29 PM" in the device's own timezone.
+  String? get checkedInLabel {
+    final at = checkedInAt?.toLocal();
+
+    if (at == null) return serverCheckedInLabel;
+
+    final hour = at.hour % 12 == 0 ? 12 : at.hour % 12;
+    final minute = at.minute.toString().padLeft(2, '0');
+
+    return '$hour:$minute ${at.hour < 12 ? 'AM' : 'PM'}';
+  }
   final String? note;
   final List<CheckInDay> recent;
 
@@ -74,7 +97,8 @@ class CheckInInfo {
       overdue: json['overdue'] as bool? ?? false,
       currentStreak: streak['current'] as int? ?? 0,
       longestStreak: streak['longest'] as int? ?? 0,
-      checkedInLabel: json['checked_in_label'] as String?,
+      checkedInAt: DateTime.tryParse(json['checked_in_at'] as String? ?? ''),
+      serverCheckedInLabel: json['checked_in_label'] as String?,
       reminderLabel: json['reminder_label'] as String?,
       note: json['note'] as String?,
       recent: (json['recent'] as List?)
@@ -129,12 +153,12 @@ class SafetyStatus {
   /// Used to repaint both cards on tap rather than after the round trip. The
   /// real response replaces this a moment later; if the request fails, the
   /// caller restores the previous status instead.
-  SafetyStatus optimisticallyCheckedIn(String nowLabel) {
+  SafetyStatus optimisticallyCheckedIn(DateTime now) {
     return SafetyStatus(
       state: 'all_safe',
       tone: SafetyTone.positive,
       headline: 'All Safe',
-      detail: 'You checked in at $nowLabel.',
+      detail: 'You checked in at ${_label(now)}.',
       circleTotal: circleTotal,
       circleSafe: circleSafe,
       checkIn: CheckInInfo(
@@ -145,7 +169,7 @@ class SafetyStatus {
             ? checkIn.currentStreak
             : checkIn.currentStreak + 1,
         longestStreak: checkIn.longestStreak,
-        checkedInLabel: nowLabel,
+        checkedInAt: now.toUtc(),
         reminderLabel: checkIn.reminderLabel,
         recent: [
           for (final day in checkIn.recent)
@@ -154,4 +178,14 @@ class SafetyStatus {
       ),
     );
   }
+}
+
+/// Same shape as [CheckInInfo.checkedInLabel], for the optimistic copy that is
+/// built before any server response exists.
+String _label(DateTime at) {
+  final local = at.toLocal();
+  final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+  final minute = local.minute.toString().padLeft(2, '0');
+
+  return '$hour:$minute ${local.hour < 12 ? 'AM' : 'PM'}';
 }

@@ -16,6 +16,7 @@ class AuthUser {
     this.username,
     this.email,
     this.avatarUrl,
+    this.timezone,
     this.userType = 'adult',
     this.phoneVerified = false,
     this.hasPassword = false,
@@ -30,6 +31,11 @@ class AuthUser {
   final String? username;
   final String? email;
   final String? avatarUrl;
+
+  /// IANA zone the server has on file, e.g. "Asia/Kolkata". Compared
+  /// against the device on each sync so the day boundary follows the
+  /// user when they travel.
+  final String? timezone;
   final String userType;
   final bool phoneVerified;
 
@@ -61,6 +67,7 @@ class AuthUser {
       username: json['username'] as String?,
       email: json['email'] as String?,
       avatarUrl: json['avatar_url'] as String?,
+      timezone: json['timezone'] as String?,
       userType: json['user_type'] as String? ?? 'adult',
       phoneVerified: json['phone_verified'] as bool? ?? false,
       hasPassword: json['has_password'] as bool? ?? false,
@@ -77,6 +84,7 @@ class AuthUser {
         'username': username,
         'email': email,
         'avatar_url': avatarUrl,
+        'timezone': timezone,
         'user_type': userType,
         'phone_verified': phoneVerified,
         'has_password': hasPassword,

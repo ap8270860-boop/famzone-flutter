@@ -83,7 +83,7 @@ class SafetyStore extends ChangeNotifier {
     final previous = _status;
 
     _submitting = true;
-    _status = previous?.optimisticallyCheckedIn(_nowLabel());
+    _status = previous?.optimisticallyCheckedIn(DateTime.now());
     notifyListeners();
 
     try {
@@ -124,15 +124,6 @@ class SafetyStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// "9:14 AM" — matches the server's own formatting, so the optimistic label
-  /// does not visibly change shape when the real response lands.
-  String _nowLabel() {
-    final now = DateTime.now();
-    final hour = now.hour % 12 == 0 ? 12 : now.hour % 12;
-    final minute = now.minute.toString().padLeft(2, '0');
-
-    return '$hour:$minute ${now.hour < 12 ? 'AM' : 'PM'}';
-  }
 }
 
 /// What came of a check-in attempt.
