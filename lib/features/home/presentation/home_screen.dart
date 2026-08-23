@@ -3,6 +3,11 @@ import 'package:flutter/material.dart';
 import '../../../core/session/session.dart';
 import '../../../core/session/session_sync.dart';
 import '../../../core/widgets/app_toast.dart';
+import '../../people/presentation/notifications_screen.dart';
+import '../../people/presentation/search_people_screen.dart';
+import '../../people/presentation/user_profile_screen.dart';
+import '../../people/state/family_store.dart';
+import '../../people/state/notification_store.dart';
 import '../../safety/state/safety_store.dart';
 import '../../../core/theme/app_colors.dart';
 import 'widgets/check_in_card.dart';
@@ -28,13 +33,6 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
 
-  // Placeholder until the circles endpoint exists.
-  static const _family = <FamilyMember>[
-    FamilyMember(name: 'Mom', status: 'All Safe'),
-    FamilyMember(name: 'Dad', status: 'All Safe'),
-    FamilyMember(name: 'Sister', status: 'All Safe'),
-  ];
-
   @override
   void initState() {
     super.initState();
@@ -44,7 +42,35 @@ class _HomeScreenState extends State<HomeScreen> {
     // showing the initials fallback to somebody who has a photo set.
     syncSession();
     SafetyStore.instance.load();
+    FamilyStore.instance.load();
+    NotificationStore.instance.refreshBadge();
   }
+
+  void _openSearch() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const SearchPeopleScreen()),
+    );
+  }
+
+  Future<void> _openNotifications() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const NotificationsScreen()),
+    );
+
+    // Accepting an invite from the feed changes the family strip, and reading
+    // the feed clears the badge.
+    if (mounted) {
+      FamilyStore.instance.load();
+      NotificationStore.instance.refreshBadge();
+    }
+  }
+
+  void _openPerson(String userId) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => UserProfileScreen(userId: userId)),
+    );
+  }
+
 
   /// Mark today safe.
   ///
@@ -64,7 +90,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _refresh() async {
     // TODO: the circle summary, once that endpoint exists.
-    await Future.wait([syncSession(), SafetyStore.instance.load()]);
+    await Future.wait([
+      syncSession(),
+      SafetyStore.instance.load(),
+      FamilyStore.instance.load(),
+      NotificationStore.instance.refreshBadge(),
+    ]);
   }
 
   @override
@@ -73,7 +104,12 @@ class _HomeScreenState extends State<HomeScreen> {
     // is restored or refreshed, not only if it happened to be there on the
     // very first build.
     return AnimatedBuilder(
-      animation: Listenable.merge([Session.instance, SafetyStore.instance]),
+      animation: Listenable.merge([
+        Session.instance,
+        SafetyStore.instance,
+        FamilyStore.instance,
+        NotificationStore.instance,
+      ]),
       builder: (context, _) => _build(context),
     );
   }
@@ -106,7 +142,11 @@ class _HomeScreenState extends State<HomeScreen> {
               120 + MediaQuery.viewPaddingOf(context).bottom,
             ),
             children: [
-              HomeHeader(onMenu: widget.onMenu),
+              HomeHeader(
+                onMenu: widget.onMenu,
+                onBell: _openNotifications,
+                hasUnread: NotificationStore.instance.unread > 0,
+              ),
               const SizedBox(height: 22),
 
               _Greeting(name: user?.firstName ?? 'there'),
@@ -130,11 +170,28 @@ class _HomeScreenState extends State<HomeScreen> {
 
               _SectionHeader(
                 title: 'My Family',
-                actionLabel: 'View All',
-                onAction: () {},
+                actionLabel: 'Find people',
+                onAction: _openSearch,
               ),
               const SizedBox(height: 12),
-              FamilyStrip(members: _family, onAdd: () {}),
+              FamilyStrip(
+                members: [
+                  for (final person in FamilyStore.instance.members)
+                    FamilyMember(
+                      id: person.id,
+                      name: person.name,
+                      status: person.relation == null
+                          ? 'Family'
+                          : person.relation![0].toUpperCase() +
+                              person.relation!.substring(1),
+                      avatarUrl: person.avatarUrl,
+                    ),
+                ],
+                onAdd: _openSearch,
+                onTapMember: (m) {
+                  if (m.id != null) _openPerson(m.id!);
+                },
+              ),
               const SizedBox(height: 20),
 
               _FeatureGrid(perRow: tilesPerRow),

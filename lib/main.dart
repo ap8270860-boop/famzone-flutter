@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'core/session/session.dart';
 import 'core/theme/app_theme.dart';
 import 'features/auth/presentation/welcome_screen.dart';
+import 'features/people/state/family_store.dart';
+import 'features/people/state/notification_store.dart';
 import 'features/safety/state/safety_store.dart';
 import 'features/shell/presentation/app_shell.dart';
 
@@ -24,6 +26,8 @@ Future<void> main() async {
 
   // Drop cached safety state when the user signs out.
   Session.instance.onSignOut(SafetyStore.instance.clear);
+  Session.instance.onSignOut(FamilyStore.instance.clear);
+  Session.instance.onSignOut(NotificationStore.instance.clear);
 
   runApp(const SFamilyApp());
 }

@@ -7,10 +7,15 @@ class FamilyMember {
   const FamilyMember({
     required this.name,
     required this.status,
+    this.id,
     this.avatarUrl,
     this.isSelf = false,
     this.online = true,
   });
+
+  /// The other person's public id, so tapping can open their
+  /// profile. Null for the placeholder self tile.
+  final String? id;
 
   final String name;
   final String status;

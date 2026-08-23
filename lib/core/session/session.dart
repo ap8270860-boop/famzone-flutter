@@ -17,6 +17,7 @@ class AuthUser {
     this.email,
     this.avatarUrl,
     this.timezone,
+    this.isPrivate = false,
     this.userType = 'adult',
     this.phoneVerified = false,
     this.hasPassword = false,
@@ -36,6 +37,10 @@ class AuthUser {
   /// against the device on each sync so the day boundary follows the
   /// user when they travel.
   final String? timezone;
+
+  /// Private accounts turn follows into requests. Public ones let
+  /// anybody follow instantly and read the profile.
+  final bool isPrivate;
   final String userType;
   final bool phoneVerified;
 
@@ -68,6 +73,9 @@ class AuthUser {
       email: json['email'] as String?,
       avatarUrl: json['avatar_url'] as String?,
       timezone: json['timezone'] as String?,
+      isPrivate: (json['privacy'] as Map<String, dynamic>?)?['is_private']
+              as bool? ??
+          false,
       userType: json['user_type'] as String? ?? 'adult',
       phoneVerified: json['phone_verified'] as bool? ?? false,
       hasPassword: json['has_password'] as bool? ?? false,
@@ -85,6 +93,7 @@ class AuthUser {
         'email': email,
         'avatar_url': avatarUrl,
         'timezone': timezone,
+        'privacy': {'is_private': isPrivate},
         'user_type': userType,
         'phone_verified': phoneVerified,
         'has_password': hasPassword,

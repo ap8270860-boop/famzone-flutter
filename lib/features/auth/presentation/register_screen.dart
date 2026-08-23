@@ -10,7 +10,6 @@ import '../../../core/api/api_client.dart';
 import '../../../core/api/api_response.dart';
 import 'login_screen.dart';
 import 'verify_otp_screen.dart';
-import 'widgets/account_type_picker.dart';
 import 'widgets/auth_scaffold.dart';
 
 /// Create an account.
@@ -19,6 +18,10 @@ import 'widgets/auth_scaffold.dart';
 /// phone. Email and referral code are genuinely optional, and the password is
 /// too — OTP is the credential. Everything else (avatar, blood group, privacy
 /// toggles) is collected later during onboarding rather than gating signup.
+// Signup asks for the minimum that makes an account work: name, number,
+// optional email. The account type moved to the profile — it is not
+// needed to create the account, and every field on this screen is a
+// chance for somebody to abandon it.
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
 
@@ -35,8 +38,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _api = ApiClient();
 
   String _countryCode = '+91';
-  AccountType _accountType = AccountType.adult;
-  EducationStage _stage = EducationStage.school;
   bool _agreed = false;
   bool _loading = false;
   bool _showReferral = false;
@@ -67,8 +68,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
         'phone_country_code': _countryCode,
         'phone_number': _phone.text.trim(),
         if (_email.text.trim().isNotEmpty) 'email': _email.text.trim(),
-        'user_type': _accountType.name,
-        if (_accountType == AccountType.kid) 'education_stage': _stage.name,
         if (_referral.text.trim().isNotEmpty)
           'referral_code': _referral.text.trim().toUpperCase(),
         'device_type': 'android',
@@ -136,14 +135,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  AccountTypePicker(
-                    type: _accountType,
-                    stage: _stage,
-                    onTypeChanged: (t) => setState(() => _accountType = t),
-                    onStageChanged: (v) => setState(() => _stage = v),
-                  ),
-                  const SizedBox(height: 20),
-
                   GlassField(
                     label: 'Full name',
                     icon: Icons.person_outline_rounded,
@@ -179,13 +170,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   const SizedBox(height: 16),
 
                   GlassField(
-                    label: _accountType == AccountType.kid
-                        ? "Parent's email"
-                        : 'Email',
+                    label: 'Email',
                     icon: Icons.alternate_email_rounded,
-                    hint: _accountType == AccountType.kid
-                        ? 'parent@example.com'
-                        : 'you@example.com',
+                    hint: 'you@example.com',
                     controller: _email,
                     optional: true,
                     keyboardType: TextInputType.emailAddress,

@@ -7,8 +7,11 @@ import '../../../core/api/api_response.dart';
 import '../../../core/session/session.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_toast.dart';
+import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/glass_field.dart';
 import '../../../core/widgets/primary_button.dart';
+import '../../auth/presentation/widgets/account_type_picker.dart';
+import '../../people/presentation/connections_screen.dart';
 import '../../auth/presentation/widgets/auth_scaffold.dart';
 import '../data/profile_api.dart';
 import 'widgets/avatar_picker.dart';
@@ -43,11 +46,18 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
   DateTime? _dob;
   String? _gender;
-  String? _bloodGroup;
   bool _showLastSeen = true;
   bool _showOnline = true;
   bool _showReceipts = true;
   bool _allowInvites = true;
+  bool _isPrivate = false;
+
+  AccountType _accountType = AccountType.adult;
+  EducationStage _stage = EducationStage.school;
+
+  int _followers = 0;
+  int _following = 0;
+  int _familyCount = 0;
   bool _useAlternateAvatar = false;
 
   String? _avatarUrl;
@@ -68,10 +78,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     'prefer_not_to_say': 'Prefer not to say',
   };
 
-  static const _bloodGroups = {
-    'A+': 'A+', 'A-': 'A−', 'B+': 'B+', 'B-': 'B−',
-    'AB+': 'AB+', 'AB-': 'AB−', 'O+': 'O+', 'O-': 'O−',
-  };
 
   @override
   void initState() {
@@ -121,12 +127,22 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       _dob = dob == null ? null : DateTime.tryParse(dob);
 
       _gender = data['gender'] as String?;
-      _bloodGroup = data['blood_group'] as String?;
 
       _showLastSeen = privacy['show_last_seen'] as bool? ?? true;
       _showOnline = privacy['show_online_status'] as bool? ?? true;
       _showReceipts = privacy['show_read_receipts'] as bool? ?? true;
       _allowInvites = privacy['allow_group_invites'] as bool? ?? true;
+      _isPrivate = privacy['is_private'] as bool? ?? false;
+
+      _accountType = _typeFrom(data['user_type'] as String?);
+      _stage = (data['education_stage'] as String?) == 'college'
+          ? EducationStage.college
+          : EducationStage.school;
+
+      final counts = data['counts'] as Map<String, dynamic>? ?? const {};
+      _followers = counts['followers'] as int? ?? 0;
+      _following = counts['following'] as int? ?? 0;
+      _familyCount = counts['family'] as int? ?? 0;
 
       _avatarUrl = data['avatar_url'] as String?;
       _alternateAvatarUrl = data['alternate_avatar_url'] as String?;
@@ -134,6 +150,33 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
       _original = _snapshot();
     });
+  }
+
+  static AccountType _typeFrom(String? value) => switch (value) {
+        'kid' => AccountType.kid,
+        'senior' => AccountType.senior,
+        _ => AccountType.adult,
+      };
+
+  void _openConnections(ConnectionsTab tab) {
+    final me = Session.instance.user;
+
+    if (me == null) return;
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ConnectionsScreen(
+          userId: me.id,
+          initialTab: tab,
+          title: me.username == null ? me.name : '@${me.username}',
+          counts: {
+            ConnectionsTab.followers: _followers,
+            ConnectionsTab.following: _following,
+            ConnectionsTab.family: _familyCount,
+          },
+        ),
+      ),
+    );
   }
 
   /// Current form values, for diffing against what the server sent.
@@ -146,12 +189,17 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             _emergency.text.trim().isEmpty ? null : _emergency.text.trim(),
         'date_of_birth': _dob?.toIso8601String().split('T').first,
         'gender': _gender,
-        'blood_group': _bloodGroup,
         'show_last_seen': _showLastSeen,
         'show_online_status': _showOnline,
         'show_read_receipts': _showReceipts,
         'allow_group_invites': _allowInvites,
+        'is_private': _isPrivate,
         'use_alternate_avatar': _useAlternateAvatar,
+        'user_type': _accountType.name,
+        // The server rejects a stage on anything but a kid account,
+        // so send null rather than a stale value.
+        'education_stage':
+            _accountType == AccountType.kid ? _stage.name : null,
       };
 
   Future<void> _save() async {
@@ -313,6 +361,14 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            _CountsRow(
+              followers: _followers,
+              following: _following,
+              family: _familyCount,
+              onTap: _openConnections,
+            ),
+            const SizedBox(height: 14),
+
             _avatars(initials),
             const SizedBox(height: 18),
 
@@ -353,7 +409,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               title: 'Personal',
               icon: Icons.cake_outlined,
               tint: AppColors.neonPink,
-              subtitle: 'Blood group appears on your SOS card.',
+              subtitle: 'Used on your SOS card and by your family.',
               children: [
                 DateOfBirthField(
                   value: _dob,
@@ -366,14 +422,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   options: _genders,
                   value: _gender,
                   onChanged: (v) => setState(() => _gender = v),
-                ),
-                const SizedBox(height: 18),
-                ChipSelect<String>(
-                  label: 'Blood group',
-                  optional: true,
-                  options: _bloodGroups,
-                  value: _bloodGroup,
-                  onChanged: (v) => setState(() => _bloodGroup = v),
                 ),
               ],
             ),
@@ -425,10 +473,38 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             const SizedBox(height: 14),
 
             SectionCard(
+              title: 'Account type',
+              icon: Icons.badge_outlined,
+              tint: AppColors.warmGold,
+              subtitle:
+                  'Changes what SFamily expects of this account. A child '
+                  'account is watched over by the family it belongs to.',
+              children: [
+                AccountTypePicker(
+                  type: _accountType,
+                  stage: _stage,
+                  onTypeChanged: (t) => setState(() => _accountType = t),
+                  onStageChanged: (v) => setState(() => _stage = v),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+
+            SectionCard(
               title: 'Privacy',
               icon: Icons.lock_outline_rounded,
               tint: AppColors.neonPurple,
               children: [
+                SettingSwitch(
+                  title: 'Private account',
+                  subtitle: _isPrivate
+                      ? 'People must ask to follow you, and only accepted '
+                          'followers see your profile.'
+                      : 'Anyone can follow you and see your profile. Turning '
+                          'this on will not remove existing followers.',
+                  value: _isPrivate,
+                  onChanged: (v) => setState(() => _isPrivate = v),
+                ),
                 SettingSwitch(
                   title: 'Show last seen',
                   subtitle: 'Your circle can see when you were last active.',
@@ -609,6 +685,69 @@ class _ChangePasswordLink extends StatelessWidget {
       style: TextButton.styleFrom(
         foregroundColor: AppColors.aqua,
         minimumSize: const Size.fromHeight(50),
+      ),
+    );
+  }
+}
+
+/// Followers, following and family, straight from the profile payload.
+class _CountsRow extends StatelessWidget {
+  const _CountsRow({
+    required this.followers,
+    required this.following,
+    required this.family,
+    this.onTap,
+  });
+
+  final int followers;
+  final int following;
+  final int family;
+
+  /// Opens the matching list. Each cell is its own tap target rather than the
+  /// whole card, so tapping "Family" does not land you on Followers.
+  final void Function(ConnectionsTab tab)? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget cell(String value, String label, ConnectionsTab tab) =>
+        Expanded(
+          child: GestureDetector(
+            onTap: onTap == null ? null : () => onTap!(tab),
+            behavior: HitTestBehavior.opaque,
+            child: Column(
+            children: [
+              Text(
+                '$value',
+                style: const TextStyle(
+                  fontSize: 23,
+                  fontWeight: FontWeight.w800,
+                  height: 1.1,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textMuted,
+                ),
+              ),
+            ],
+            ),
+          ),
+        );
+
+    return GlassCard(
+      padding: const EdgeInsets.symmetric(vertical: 18),
+      radius: 18,
+      child: Row(
+        children: [
+          cell('$followers', 'Followers', ConnectionsTab.followers),
+          cell('$following', 'Following', ConnectionsTab.following),
+          cell('$family', 'Family', ConnectionsTab.family),
+        ],
       ),
     );
   }
