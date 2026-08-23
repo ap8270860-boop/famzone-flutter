@@ -4,11 +4,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:famzone/main.dart';
 
 void main() {
-  testWidgets('connectivity screen renders with a ping button', (tester) async {
-    await tester.pumpWidget(const FamZoneApp());
+  testWidgets('welcome screen shows wordmark, promise and both actions',
+      (tester) async {
+    await tester.pumpWidget(const SFamilyApp());
 
-    expect(find.text('FamZone'), findsOneWidget);
-    expect(find.text('API connectivity'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Ping the API'), findsOneWidget);
+    expect(find.text('S'), findsOneWidget);
+    expect(find.text('Family'), findsOneWidget);
+    expect(find.text('LOGIN'), findsOneWidget);
+    expect(find.text('CREATE ACCOUNT'), findsOneWidget);
   });
 }

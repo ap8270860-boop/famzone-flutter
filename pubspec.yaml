@@ -38,6 +38,12 @@ dependencies:
   # HTTP client for talking to the FamZone API.
   http: ^1.2.0
 
+  # Keychain / Keystore backed storage for the auth token.
+  flutter_secure_storage: ^9.2.2
+
+  # Camera and gallery access for the avatar picker.
+  image_picker: ^1.1.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -59,6 +65,15 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+
+  # Asset folders. Adding a folder here bundles every file directly inside
+  # it — new files are picked up without editing this list again.
+  # Density variants in 2.0x/ and 3.0x/ subfolders are resolved automatically.
+  assets:
+    - assets/logo/
+    - assets/images/
+    - assets/icons/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
