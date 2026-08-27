@@ -5,6 +5,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_toast.dart';
 import '../../auth/presentation/welcome_screen.dart';
 import '../../profile/presentation/edit_profile_screen.dart';
+import '../../safety/presentation/check_in_history_screen.dart';
 
 /// The hamburger menu.
 class AppDrawer extends StatelessWidget {
@@ -33,6 +34,12 @@ class AppDrawer extends StatelessWidget {
                   children: [
                     _item(context, Icons.person_outline_rounded, 'My profile',
                         () => _push(context, const EditProfileScreen())),
+                    _item(
+                      context,
+                      Icons.event_available_outlined,
+                      'Check-in history',
+                      () => _push(context, const CheckInHistoryScreen()),
+                    ),
                     _item(context, Icons.groups_outlined, 'My circles', null),
                     _item(context, Icons.location_on_outlined,
                         'Location sharing', null),
