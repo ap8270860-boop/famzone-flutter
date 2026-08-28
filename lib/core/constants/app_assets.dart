@@ -18,8 +18,9 @@ abstract final class AppAssets {
 
   // --- Illustrations -----------------------------------------------------
 
-  /// Full-bleed artwork for the welcome screen.
-  static const String welcomeScreen = '$_images/welcome_screen_image.png';
+  /// Full-screen artwork, 1:2.224. The top ~58% is the scene; the rest
+  /// is empty gradient the login controls are drawn over.
+  static const String welcomeScreen = '$_images/welcome-screen.png';
 
   /// The AI companion mascot, edges feathered for dark backgrounds.
   static const String robotMascot = '$_images/robot_mascot.png';

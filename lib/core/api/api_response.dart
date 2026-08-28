@@ -42,10 +42,15 @@ class ApiResponse {
 /// Thrown when a request cannot complete — no network, timeout, bad TLS,
 /// or a response body that is not the expected envelope.
 class ApiException implements Exception {
-  const ApiException(this.message, {this.statusCode});
+  const ApiException(this.message, {this.statusCode, this.offline = false});
 
   final String message;
   final int? statusCode;
+
+  /// True when the request never reached the server — no network, no DNS, or
+  /// a timeout. Worth distinguishing: an offline failure is fixed by the user
+  /// and is worth offering a Retry for, whereas a 500 is not.
+  final bool offline;
 
   @override
   String toString() => message;

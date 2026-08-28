@@ -4,10 +4,15 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_toast.dart';
 import '../../../core/widgets/aurora_background.dart';
 import '../../../core/widgets/glass_card.dart';
+import '../../chat/presentation/chat_screen.dart';
+import '../../posts/data/post_models.dart';
+import '../../posts/data/posts_api.dart';
+import '../../posts/presentation/widgets/post_grid.dart';
 import '../data/people_api.dart';
 import '../data/people_models.dart';
 import '../state/family_store.dart';
 import 'connections_screen.dart';
+import 'widgets/block_sheet.dart';
 import 'widgets/person_avatar.dart';
 
 /// Somebody else's profile.
@@ -27,6 +32,31 @@ class UserProfileScreen extends StatefulWidget {
 class _UserProfileScreenState extends State<UserProfileScreen> {
   final _api = PeopleApi();
 
+  final _postsApi = PostsApi();
+
+  List<Post> _posts = const [];
+  bool _postsLoading = true;
+  bool _postsVisible = true;
+
+  Future<void> _loadPosts() async {
+    try {
+      final res = await _postsApi.forUser(widget.userId);
+
+      if (!mounted) return;
+
+      setState(() {
+        if (res.success) {
+          final page = PostPage.fromJson(res.dataMap);
+          _posts = page.posts;
+          _postsVisible = page.canView;
+        }
+        _postsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _postsLoading = false);
+    }
+  }
+
   PersonProfile? _profile;
   bool _loading = true;
   bool _busy = false;
@@ -36,11 +66,13 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   void initState() {
     super.initState();
     _load();
+    _loadPosts();
   }
 
   @override
   void dispose() {
     _api.dispose();
+    _postsApi.dispose();
     super.dispose();
   }
 
@@ -106,6 +138,25 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     return _act(() => _api.respondToFollowRequest(id, accept));
   }
 
+  void _openChat() {
+    final p = _profile;
+
+    if (p == null) return;
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ChatScreen(
+          userId: p.id,
+          name: p.name,
+          username: p.username,
+          avatarUrl: p.avatarUrl,
+          initials: p.initials,
+          presence: p.lastSeenLabel,
+        ),
+      ),
+    );
+  }
+
   void _openConnections(ConnectionsTab tab) {
     final p = _profile;
 
@@ -126,6 +177,59 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       ),
     );
   }
+
+
+  Future<void> _openActions() async {
+    final p = _profile;
+
+    if (p == null) return;
+
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => ProfileActionsSheet(
+        isBlocked: p.relationship.blockedByMe,
+      ),
+    );
+
+    if (choice == null || !mounted) return;
+
+    if (choice == 'block') {
+      p.relationship.blockedByMe ? await _unblock() : await _confirmBlock();
+    } else if (choice == 'report') {
+      AppToast.show(
+        context,
+        'Reporting is coming soon.',
+        type: ToastType.info,
+      );
+    }
+  }
+
+  Future<void> _confirmBlock() async {
+    final p = _profile!;
+
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => BlockSheet(
+        name: p.name,
+        username: p.username,
+        avatarUrl: p.avatarUrl,
+        initials: p.initials,
+        isFamily: p.relationship.isFamily,
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    await _act(() => _api.block(widget.userId));
+
+    // Blocking severs the family link, so the home strip is now wrong.
+    await FamilyStore.instance.load();
+  }
+
+  Future<void> _unblock() => _act(() => _api.unblock(widget.userId));
 
   Future<void> _inviteToFamily() async {
     final relation = await showModalBottomSheet<String>(
@@ -176,6 +280,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                         ),
                       ),
                     ),
+                    if (_profile != null && !_profile!.relationship.isSelf)
+                      IconButton(
+                        icon: const Icon(Icons.more_vert_rounded,
+                            color: AppColors.textPrimary),
+                        onPressed: _openActions,
+                      ),
                   ],
                 ),
               ),
@@ -269,9 +379,21 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           const SizedBox(height: 12),
         ],
 
-        if (!rel.isSelf) _actions(rel),
+        if (!rel.isSelf)
+          if (rel.blockedByMe)
+            _Action(
+              label: 'Unblock',
+              filled: false,
+              busy: _busy,
+              onTap: _unblock,
+            )
+          else
+            _actions(rel),
 
-        if (!p.isVisible) ...[
+        if (rel.blockedByMe) ...[
+          const SizedBox(height: 20),
+          const _BlockedPanel(),
+        ] else if (!p.isVisible) ...[
           const SizedBox(height: 20),
           const _PrivatePanel(),
         ],
@@ -280,46 +402,145 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           const SizedBox(height: 14),
           _DetailRow(icon: Icons.phone_rounded, label: p.phone!),
         ],
+
+        if (!rel.blockedByMe) ...[
+          const SizedBox(height: 22),
+          _postsSection(p),
+        ],
       ],
     );
   }
 
-  Widget _actions(Relationship rel) {
-    return Row(
-      children: [
-        Expanded(
-          child: _Action(
-            label: rel.followLabel,
-            filled: !rel.isFollowing && !rel.hasRequested,
-            busy: _busy,
-            onTap: _toggleFollow,
+  /// The photo grid.
+  ///
+  /// `can_view` from the API decides between a grid, a locked panel
+  /// and an empty state. They are three different things, and showing
+  /// an empty grid for a private account would read as "no posts".
+  Widget _postsSection(PersonProfile p) {
+    if (_postsLoading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 30),
+        child: Center(
+          child: SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: AppColors.mint),
           ),
         ),
-        if (rel.canInviteToFamily) ...[
-          const SizedBox(width: 10),
-          Expanded(
-            child: _Action(
-              label: 'Add to family',
-              icon: Icons.group_add_rounded,
-              filled: false,
-              accent: AppColors.mint,
-              busy: _busy,
-              onTap: _inviteToFamily,
-            ),
+      );
+    }
+
+    if (!_postsVisible) {
+      return const PostGridEmpty(
+        icon: Icons.lock_outline_rounded,
+        title: 'Posts are private',
+        detail: 'Follow this account, and once they accept you will '
+            'see their photos.',
+      );
+    }
+
+    if (_posts.isEmpty) {
+      return const PostGridEmpty(
+        icon: Icons.photo_camera_outlined,
+        title: 'No posts yet',
+        detail: 'When they share a photo it will show up here.',
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 10),
+          child: Row(
+            children: [
+              const Icon(Icons.grid_on_rounded,
+                  size: 15, color: AppColors.textMuted),
+              const SizedBox(width: 7),
+              Text(
+                _posts.length == 1 ? '1 post' : '${_posts.length} posts',
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textMuted,
+                ),
+              ),
+            ],
           ),
-        ] else if (rel.family == 'pending_out') ...[
-          const SizedBox(width: 10),
-          const Expanded(child: _Static(label: 'Family invite sent')),
-        ] else if (rel.isFamily) ...[
-          const SizedBox(width: 10),
-          Expanded(
-            child: _Static(
-              label: rel.familyRelation == null
-                  ? 'Family'
-                  : _titled(rel.familyRelation!),
-              icon: Icons.favorite_rounded,
-              accent: AppColors.mint,
+        ),
+        PostGrid(
+          posts: _posts,
+          title: p.username == null ? p.name : '@${p.username}',
+          onChanged: _loadPosts,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+        ),
+      ],
+    );
+  }
+
+  /// Follow and Message on the top row — the two things anybody opens a
+  /// profile to do. Family gets its own line below, because it is conditional
+  /// and squeezing three buttons across a phone leaves none of them legible.
+  Widget _actions(Relationship rel) {
+    final hasFamilyRow = rel.canInviteToFamily ||
+        rel.family == 'pending_out' ||
+        rel.isFamily;
+
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: _Action(
+                label: rel.followLabel,
+                filled: !rel.isFollowing && !rel.hasRequested,
+                busy: _busy,
+                onTap: _toggleFollow,
+              ),
             ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _Action(
+                label: 'Message',
+                icon: Icons.chat_bubble_outline_rounded,
+                filled: false,
+                accent: AppColors.aqua,
+                busy: false,
+                onTap: _openChat,
+              ),
+            ),
+          ],
+        ),
+        if (hasFamilyRow) ...[
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              if (rel.canInviteToFamily)
+                Expanded(
+                  child: _Action(
+                    label: 'Add to family',
+                    icon: Icons.group_add_rounded,
+                    filled: false,
+                    accent: AppColors.mint,
+                    busy: _busy,
+                    onTap: _inviteToFamily,
+                  ),
+                )
+              else if (rel.family == 'pending_out')
+                const Expanded(child: _Static(label: 'Family invite sent'))
+              else
+                Expanded(
+                  child: _Static(
+                    label: rel.familyRelation == null
+                        ? 'Family'
+                        : _titled(rel.familyRelation!),
+                    icon: Icons.favorite_rounded,
+                    accent: AppColors.mint,
+                  ),
+                ),
+            ],
           ),
         ],
       ],
@@ -433,6 +654,44 @@ class _RequestPanel extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BlockedPanel extends StatelessWidget {
+  const _BlockedPanel();
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      padding: const EdgeInsets.fromLTRB(18, 22, 18, 22),
+      radius: 18,
+      child: Column(
+        children: [
+          Icon(Icons.block_flipped,
+              size: 30, color: AppColors.alertRed.withValues(alpha: 0.8)),
+          const SizedBox(height: 11),
+          const Text(
+            'You blocked this account',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: AppColors.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 5),
+          const Text(
+            'They cannot find you, see your profile, or contact you. They '
+            'were not told. Unblocking does not restore following or family.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.45,
+              color: AppColors.textMuted,
+            ),
           ),
         ],
       ),

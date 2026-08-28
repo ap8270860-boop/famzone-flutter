@@ -5,6 +5,8 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_toast.dart';
 import '../../auth/presentation/welcome_screen.dart';
 import '../../profile/presentation/edit_profile_screen.dart';
+import '../../people/presentation/blocked_accounts_screen.dart';
+import '../../posts/presentation/my_posts_screen.dart';
 import '../../safety/presentation/check_in_history_screen.dart';
 
 /// The hamburger menu.
@@ -36,6 +38,12 @@ class AppDrawer extends StatelessWidget {
                         () => _push(context, const EditProfileScreen())),
                     _item(
                       context,
+                      Icons.grid_on_rounded,
+                      'My posts',
+                      () => _push(context, const MyPostsScreen()),
+                    ),
+                    _item(
+                      context,
                       Icons.event_available_outlined,
                       'Check-in history',
                       () => _push(context, const CheckInHistoryScreen()),
@@ -50,6 +58,12 @@ class AppDrawer extends StatelessWidget {
                     _item(context, Icons.workspace_premium_outlined,
                         'Subscription', null,
                         badge: user?.isPremium == true ? 'Premium' : null),
+                    _item(
+                      context,
+                      Icons.block_flipped,
+                      'Blocked accounts',
+                      () => _push(context, const BlockedAccountsScreen()),
+                    ),
                     const Divider(color: AppColors.glassBorder, height: 24),
                     _item(context, Icons.help_outline_rounded, 'Help & support',
                         null),

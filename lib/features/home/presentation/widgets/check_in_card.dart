@@ -141,7 +141,11 @@ class _WeekStrip extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 10,
                   fontWeight: day.isToday ? FontWeight.w700 : FontWeight.w500,
-                  color: day.isToday ? accent : AppColors.textMuted,
+                  color: day.isToday
+                      ? accent
+                      : day.isFuture
+                          ? AppColors.textMuted.withValues(alpha: 0.45)
+                          : AppColors.textMuted,
                 ),
               ),
               const SizedBox(height: 5),
@@ -153,10 +157,17 @@ class _WeekStrip extends StatelessWidget {
                   shape: BoxShape.circle,
                   color: day.done
                       ? accent.withValues(alpha: 0.9)
-                      : Colors.white.withValues(alpha: 0.06),
+                      // Three states, not two: checked in, missed, and not
+                      // yet. A day still to come is barely there; a missed
+                      // one is a visible empty slot.
+                      : Colors.white
+                          .withValues(alpha: day.isFuture ? 0.025 : 0.07),
                   border: day.isToday && !day.done
                       ? Border.all(color: accent.withValues(alpha: 0.55))
-                      : null,
+                      : day.isFuture
+                          ? Border.all(
+                              color: Colors.white.withValues(alpha: 0.05))
+                          : null,
                 ),
                 child: day.done
                     ? const Icon(Icons.check_rounded,

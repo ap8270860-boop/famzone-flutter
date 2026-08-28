@@ -18,6 +18,10 @@ class AuthUser {
     this.avatarUrl,
     this.timezone,
     this.isPrivate = false,
+    this.about,
+    this.followersCount = 0,
+    this.followingCount = 0,
+    this.familyCount = 0,
     this.userType = 'adult',
     this.phoneVerified = false,
     this.hasPassword = false,
@@ -41,6 +45,14 @@ class AuthUser {
   /// Private accounts turn follows into requests. Public ones let
   /// anybody follow instantly and read the profile.
   final bool isPrivate;
+
+  final String? about;
+
+  /// Read straight off /me, so the profile header can draw its
+  /// numbers without a second request.
+  final int followersCount;
+  final int followingCount;
+  final int familyCount;
   final String userType;
   final bool phoneVerified;
 
@@ -76,6 +88,13 @@ class AuthUser {
       isPrivate: (json['privacy'] as Map<String, dynamic>?)?['is_private']
               as bool? ??
           false,
+      about: json['about'] as String?,
+      followersCount:
+          (json['counts'] as Map<String, dynamic>?)?['followers'] as int? ?? 0,
+      followingCount:
+          (json['counts'] as Map<String, dynamic>?)?['following'] as int? ?? 0,
+      familyCount:
+          (json['counts'] as Map<String, dynamic>?)?['family'] as int? ?? 0,
       userType: json['user_type'] as String? ?? 'adult',
       phoneVerified: json['phone_verified'] as bool? ?? false,
       hasPassword: json['has_password'] as bool? ?? false,
@@ -94,6 +113,12 @@ class AuthUser {
         'avatar_url': avatarUrl,
         'timezone': timezone,
         'privacy': {'is_private': isPrivate},
+        'about': about,
+        'counts': {
+          'followers': followersCount,
+          'following': followingCount,
+          'family': familyCount,
+        },
         'user_type': userType,
         'phone_verified': phoneVerified,
         'has_password': hasPassword,

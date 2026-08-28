@@ -10,14 +10,16 @@ import 'widgets/sfamily_wordmark.dart';
 
 /// The first screen a user sees.
 ///
-/// The artwork covers the full screen; the wordmark, promise and the two
-/// ways in are drawn straight onto it, in the empty area the artwork
-/// leaves below the feature cards.
-/// The first screen a user sees.
+/// The artwork is drawn for this screen: 1:2.224, with the scene in the top
+/// 58% and deliberately empty gradient below it. So it covers the whole
+/// screen and the wordmark, promise and the two ways in sit on the empty
+/// part, with no drawn background of our own underneath.
 ///
-/// The artwork fills the top of the screen at its natural aspect ratio,
-/// so nothing is cropped from the sides. The wordmark, promise and the
-/// two ways in are real widgets over its lower edge.
+/// Cover rather than contain, anchored to the top. On a screen taller than
+/// the artwork the sides overflow by a few percent — which is why the source
+/// image keeps every element clear of its outer edges. Anchoring to the top
+/// means anything trimmed vertically comes off the empty bottom, never off
+/// the family.
 class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({
     super.key,
@@ -28,17 +30,13 @@ class WelcomeScreen extends StatelessWidget {
   final VoidCallback? onLogin;
   final VoidCallback? onCreateAccount;
 
-  /// Artwork is 1024 x 1536.
-  static const double _artworkAspect = 1536 / 1024;
-
-  /// Sampled from the artwork's bottom edge, so the painted image and the
-  /// drawn background meet without a visible seam.
-  static const Color _seam = Color(0xFF01114B);
+  /// The artwork's own bottom colour, sampled from the file. Used for the
+  /// scaffold and the scrim so nothing behind the image is a different hue.
+  static const Color _artworkBase = Color(0xFF0F015B);
 
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
-    final artworkHeight = size.width * _artworkAspect;
     final compact = size.height < 720;
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -49,53 +47,29 @@ class WelcomeScreen extends StatelessWidget {
         systemNavigationBarIconBrightness: Brightness.light,
       ),
       child: Scaffold(
-        backgroundColor: AppColors.deepNavy,
+        backgroundColor: _artworkBase,
         body: Stack(
           fit: StackFit.expand,
           children: [
-            // Carries the artwork's colours down past its bottom edge.
-            const DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [_seam, Color(0xFF0A1247), AppColors.deepNavy],
-                  stops: [0.0, 0.45, 1.0],
-                ),
-              ),
-            ),
-
-            // The artwork: full width, top aligned, never cropped sideways.
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              height: artworkHeight,
+            // The artwork, full screen.
+            Positioned.fill(
               child: Image.asset(
                 AppAssets.welcomeScreen,
-                fit: BoxFit.fitWidth,
+                fit: BoxFit.cover,
                 alignment: Alignment.topCenter,
               ),
             ),
 
-            // Soften the artwork's bottom edge into the background.
-            Positioned(
-              top: artworkHeight - 90,
-              left: 0,
-              right: 0,
-              height: 90,
-              child: const DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Color(0x0001114B), _seam],
-                  ),
-                ),
-              ),
-            ),
-
-            // Scrim so the swirls never fight the text.
+            // A light scrim under the text.
+            //
+            // Tinted with the artwork's own bottom colour rather than the
+            // app's navy — they are different hues, and fading one into the
+            // other leaves a visible colour shift across the lower third.
+            //
+            // It also stops short of opaque: the artwork's bottom is already
+            // dark and near-empty, so all this needs to do is lift contrast a
+            // little. Painting it out would hide the swirls the image was
+            // drawn to keep.
             Positioned(
               bottom: 0,
               left: 0,
@@ -107,11 +81,11 @@ class WelcomeScreen extends StatelessWidget {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Color(0x00050D2C),
-                      Color(0xCC050D2C),
-                      Color(0xFF050D2C),
+                      Color(0x000F015B),
+                      Color(0x800F015B),
+                      Color(0xB30F015B),
                     ],
-                    stops: [0.0, 0.42, 0.72],
+                    stops: [0.0, 0.5, 1.0],
                   ),
                 ),
               ),

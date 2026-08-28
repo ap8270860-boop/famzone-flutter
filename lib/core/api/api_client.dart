@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -141,17 +142,9 @@ class ApiClient {
         response.body,
         DateTime.now().difference(started),
       );
-    } on SocketException catch (e) {
-      ApiLogger.failure(method, uri, e);
-      throw const ApiException(
-        'No internet connection. Check your network and try again.',
-      );
-    } on HandshakeException catch (e) {
-      ApiLogger.failure(method, uri, e);
-      throw const ApiException('Could not establish a secure connection.');
     } catch (e) {
       ApiLogger.failure(method, uri, e);
-      throw ApiException('Request failed: $e');
+      throw _classify(e);
     }
 
     final Map<String, dynamic> decoded;
@@ -166,6 +159,61 @@ class ApiClient {
     }
 
     return ApiResponse.fromJson(decoded, response.statusCode);
+  }
+
+
+  /// Turn a transport failure into something worth showing a user.
+  ///
+  /// The catch that matters is [http.ClientException]. `package:http` wraps
+  /// the real cause rather than letting it through, so an
+  /// `on SocketException` clause never fires for a request made with it — the
+  /// phone being offline fell through to the generic branch and surfaced as
+  /// "Request failed: ClientException with SocketException...", which is a
+  /// stack trace wearing a message's clothes.
+  ///
+  /// So the wrapper is unwrapped by inspecting it, and only then given
+  /// wording somebody can act on.
+  ApiException _classify(Object error) {
+    if (error is TimeoutException) {
+      return const ApiException(
+        'The server took too long to respond. Try again.',
+        offline: true,
+      );
+    }
+
+    if (error is HandshakeException) {
+      return const ApiException('Could not establish a secure connection.');
+    }
+
+    if (error is SocketException) {
+      return _networkFailure(error.message);
+    }
+
+    if (error is http.ClientException) {
+      return _networkFailure(error.message);
+    }
+
+    return ApiException('Something went wrong. ($error)');
+  }
+
+  /// Separate "no network at all" from "the name would not resolve", because
+  /// they call for different things from the user.
+  ApiException _networkFailure(String message) {
+    final text = message.toLowerCase();
+
+    if (text.contains('failed host lookup') ||
+        text.contains('no address associated')) {
+      return const ApiException(
+        "Couldn't reach SFamily. Check your Wi-Fi or mobile data and try "
+        'again.',
+        offline: true,
+      );
+    }
+
+    return const ApiException(
+      'No internet connection. Check your network and try again.',
+      offline: true,
+    );
   }
 
   void dispose() => _client.close();

@@ -59,6 +59,18 @@ class PeopleApi {
   Future<ApiResponse> removeFamilyMember(String familyId) =>
       _api.delete('family/$familyId');
 
+  // --- Blocking ----------------------------------------------------------
+
+  Future<ApiResponse> block(String userId, {String? reason}) =>
+      _api.post('users/$userId/block', body: {
+        if (reason != null) 'reason': reason,
+      });
+
+  Future<ApiResponse> unblock(String userId) =>
+      _api.delete('users/$userId/block');
+
+  Future<ApiResponse> blockedAccounts() => _api.get('blocks');
+
   // --- Notifications -----------------------------------------------------
 
   Future<ApiResponse> notifications({int page = 1}) =>

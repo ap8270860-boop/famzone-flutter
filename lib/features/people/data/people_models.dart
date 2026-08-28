@@ -19,6 +19,8 @@ class Relationship {
     this.familyId,
     this.familyRelation,
     this.canInviteToFamily = false,
+    this.blockedByMe = false,
+    this.canFollow = true,
   });
 
   /// False when the payload carried no relationship block at all.
@@ -49,6 +51,15 @@ class Relationship {
   final String? familyRelation;
   final bool canInviteToFamily;
 
+  /// Whether the signed-in user has blocked this person.
+  ///
+  /// There is deliberately no flag for the other direction. Someone
+  /// who blocked you cannot be seen at all — their profile 404s —
+  /// so the app never has to render that state, and cannot leak it.
+  final bool blockedByMe;
+
+  final bool canFollow;
+
   bool get isFollowing => following == 'accepted';
   bool get hasRequested => following == 'pending';
   bool get followsMe => followedBy == 'accepted';
@@ -74,6 +85,8 @@ class Relationship {
         familyId: json['family_id'] as String?,
         familyRelation: json['family_relation'] as String?,
         canInviteToFamily: json['can_invite_to_family'] as bool? ?? false,
+        blockedByMe: json['blocked_by_me'] as bool? ?? false,
+        canFollow: json['can_follow'] as bool? ?? true,
       );
 }
 
@@ -141,6 +154,7 @@ class PersonProfile {
     this.about,
     this.phone,
     this.userType = 'adult',
+    this.lastSeenAt,
     this.followers = 0,
     this.following = 0,
     this.familyCount = 0,
@@ -153,6 +167,27 @@ class PersonProfile {
   final String? about;
   final String? phone;
   final String userType;
+
+  /// Null when the account hides last-seen, or when the viewer cannot
+  /// see the profile. Absent means "do not show a presence line" — not
+  /// "offline", which would be a claim the server never made.
+  final DateTime? lastSeenAt;
+
+  /// "Online", "Last seen 2h ago" — or null.
+  String? get lastSeenLabel {
+    final at = lastSeenAt?.toLocal();
+
+    if (at == null) return null;
+
+    final d = DateTime.now().difference(at);
+
+    if (d.inMinutes < 2) return 'Online';
+    if (d.inMinutes < 60) return 'Last seen ${d.inMinutes}m ago';
+    if (d.inHours < 24) return 'Last seen ${d.inHours}h ago';
+    if (d.inDays < 7) return 'Last seen ${d.inDays}d ago';
+
+    return 'Last seen a while ago';
+  }
 
   final int followers;
   final int following;
@@ -183,6 +218,7 @@ class PersonProfile {
       about: json['about'] as String?,
       phone: json['phone'] as String?,
       userType: json['user_type'] as String? ?? 'adult',
+      lastSeenAt: DateTime.tryParse(json['last_seen_at'] as String? ?? ''),
       followers: counts['followers'] as int? ?? 0,
       following: counts['following'] as int? ?? 0,
       familyCount: counts['family'] as int? ?? 0,

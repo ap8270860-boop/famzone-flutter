@@ -18,6 +18,7 @@ class CheckInDay {
     required this.initial,
     required this.done,
     required this.isToday,
+    this.isFuture = false,
   });
 
   final String date;
@@ -27,11 +28,16 @@ class CheckInDay {
   final bool done;
   final bool isToday;
 
+  /// Later this week. Drawn faintly rather than as an empty slot, because a
+  /// day that has not happened is not a day that was missed.
+  final bool isFuture;
+
   factory CheckInDay.fromJson(Map<String, dynamic> json) => CheckInDay(
         date: json['date'] as String? ?? '',
         initial: json['initial'] as String? ?? '',
         done: json['done'] as bool? ?? false,
         isToday: json['is_today'] as bool? ?? false,
+        isFuture: json['is_future'] as bool? ?? false,
       );
 
   CheckInDay copyWith({bool? done}) => CheckInDay(
@@ -39,6 +45,7 @@ class CheckInDay {
         initial: initial,
         done: done ?? this.done,
         isToday: isToday,
+        isFuture: isFuture,
       );
 }
 

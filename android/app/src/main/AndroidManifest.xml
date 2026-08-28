@@ -29,6 +29,19 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <!--
+          uCrop, from image_cropper. A sibling of MainActivity, not a child —
+          <activity> cannot nest, and AAPT rejects it at resource-link time
+          with "unexpected element <activity>".
+
+          Declaring it matters: an undeclared activity builds fine and then
+          crashes the moment somebody taps "choose from gallery".
+        -->
+        <activity
+            android:name="com.yalantis.ucrop.UCropActivity"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.AppCompat.Light.NoActionBar"/>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
