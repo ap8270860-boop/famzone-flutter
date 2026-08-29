@@ -103,16 +103,40 @@ class ApiClient {
         ..fields.addAll(fields)
         ..files.add(await http.MultipartFile.fromPath(field, filePath));
 
-      final streamed = await request.send().timeout(AppConfig.requestTimeout);
+      final streamed = await request.send().timeout(AppConfig.uploadTimeout);
       final response = await http.Response.fromStream(streamed);
 
       ApiLogger.response('POST', uri, response.statusCode, response.body,
           DateTime.now().difference(started));
 
-      return ApiResponse.fromJson(
-        jsonDecode(response.body) as Map<String, dynamic>,
-        response.statusCode,
-      );
+      // nginx and PHP-FPM both refuse an oversized upload before Laravel
+      // ever sees it, and they answer with an HTML error page rather than
+      // our envelope. Decoding that as JSON throws, and the user is told
+      // "Upload failed: FormatException" — which points at nothing.
+      if (response.statusCode == 413) {
+        throw const ApiException(
+          'That file is too large to send.',
+          statusCode: 413,
+        );
+      }
+
+      try {
+        return ApiResponse.fromJson(
+          jsonDecode(response.body) as Map<String, dynamic>,
+          response.statusCode,
+        );
+      } on FormatException {
+        // Any other non-JSON body: a gateway error, a maintenance page. Say
+        // what the server actually returned rather than paraphrasing a
+        // parser failure.
+        throw ApiException(
+          'The server rejected that upload (${response.statusCode}).',
+          statusCode: response.statusCode,
+        );
+      }
+    } on ApiException {
+      // Already meaningful — do not rewrap it as "Upload failed: ...".
+      rethrow;
     } on SocketException catch (e) {
       ApiLogger.failure('POST', uri, e);
       throw const ApiException('No internet connection.');

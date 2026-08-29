@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../chat/presentation/inbox_screen.dart';
+import '../../chat/state/chat_store.dart';
+import '../../chat/state/realtime_client.dart';
 import '../../home/presentation/home_screen.dart';
 import 'app_drawer.dart';
 import 'placeholder_tab.dart';
@@ -21,17 +24,53 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
 
   late int _index = widget.initialIndex;
 
   static const _tabs = <_TabSpec>[
     _TabSpec(Icons.home_rounded, Icons.home_outlined, 'Home'),
-    _TabSpec(Icons.groups_rounded, Icons.groups_outlined, 'Circle'),
+    _TabSpec(Icons.groups_rounded, Icons.groups_outlined, 'Chats'),
     _TabSpec(Icons.verified_user_rounded, Icons.verified_user_outlined, 'Alerts'),
     _TabSpec(Icons.person_rounded, Icons.person_outline_rounded, 'Profile'),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+
+    WidgetsBinding.instance.addObserver(this);
+
+    // Opens the websocket and joins this user's mailbox channel, so the
+    // unread badge stays right whether or not a chat screen is open. A no-op
+    // when no Reverb key is configured.
+    RealtimeClient.instance.start();
+
+    // The badge has to be right before anybody opens Messages. Without this
+    // the only way to find out you have unread messages is to go looking for
+    // them, which rather defeats the point of a badge.
+    ChatStore.instance.refreshBadge();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+
+    // Dart timers are frozen while the process is suspended, so a socket that
+    // died overnight sits in a pending retry that fires whenever it gets
+    // around to it. Poking it here is the difference between a chat that is
+    // live the moment the phone is unlocked and one that takes half a minute
+    // to notice it is alone.
+    RealtimeClient.instance.resume();
+    ChatStore.instance.refreshBadge();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -56,11 +95,10 @@ class _AppShellState extends State<AppShell> {
             HomeScreen(
               onMenu: () => _scaffoldKey.currentState?.openDrawer(),
             ),
-            const PlaceholderTab(
-              icon: Icons.groups_rounded,
-              title: 'Your circle',
-              message: 'Family and friend groups land here next.',
-            ),
+            // Kept alive by the IndexedStack, so returning to it does
+            // not refetch — and it does not need to, because the socket has
+            // been updating it the whole time it was off screen.
+            const InboxScreen(embedded: true),
             const PlaceholderTab(
               icon: Icons.shield_rounded,
               title: 'Alerts',
@@ -73,14 +111,29 @@ class _AppShellState extends State<AppShell> {
             ),
           ],
         ),
-        bottomNavigationBar: _GlassNavBar(
-          tabs: _tabs,
-          index: _index,
-          onChanged: (i) => setState(() => _index = i),
-          onSos: () => _confirmSos(context),
+        // Rebuilt from the store so the badge changes the moment a
+        // message arrives, on whatever tab the user happens to be looking at.
+        bottomNavigationBar: AnimatedBuilder(
+          animation: ChatStore.instance,
+          builder: (context, _) => _GlassNavBar(
+            tabs: _tabs,
+            index: _index,
+            badges: [0, ChatStore.instance.unread, 0, 0],
+            onChanged: _select,
+            onSos: () => _confirmSos(context),
+          ),
         ),
       ),
     );
+  }
+
+  void _select(int index) {
+    setState(() => _index = index);
+
+    // Opening Chats reconciles with the server. The socket keeps the list
+    // live while the app runs, but anything that happened during a dropped
+    // connection is only caught by asking.
+    if (index == 1) ChatStore.instance.refresh();
   }
 
   /// SOS is destructive and irreversible once sent, so it always confirms.
@@ -111,12 +164,17 @@ class _GlassNavBar extends StatelessWidget {
   const _GlassNavBar({
     required this.tabs,
     required this.index,
+    required this.badges,
     required this.onChanged,
     required this.onSos,
   });
 
   final List<_TabSpec> tabs;
   final int index;
+
+  /// One count per tab; zero draws nothing.
+  final List<int> badges;
+
   final ValueChanged<int> onChanged;
   final VoidCallback onSos;
 
@@ -199,6 +257,7 @@ class _GlassNavBar extends StatelessWidget {
   Widget _item(int i) {
     final selected = index == i;
     final tab = tabs[i];
+    final badge = i < badges.length ? badges[i] : 0;
 
     return Expanded(
       child: GestureDetector(
@@ -207,10 +266,50 @@ class _GlassNavBar extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              selected ? tab.active : tab.inactive,
-              size: 29,
-              color: selected ? AppColors.mint : AppColors.navInactive,
+            // The badge overhangs the icon rather than sitting beside it, so
+            // a count appearing never shifts the row's layout.
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Icon(
+                  selected ? tab.active : tab.inactive,
+                  size: 29,
+                  color: selected ? AppColors.mint : AppColors.navInactive,
+                ),
+                if (badge > 0)
+                  Positioned(
+                    top: -3,
+                    right: -8,
+                    child: Container(
+                      constraints: const BoxConstraints(minWidth: 18),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(20),
+                        color: AppColors.alertRed,
+                        // A ring in the bar's own colour, so the badge reads
+                        // as sitting on top of the icon rather than merging
+                        // into it.
+                        border: Border.all(
+                          color: AppColors.barSurface,
+                          width: 2,
+                        ),
+                      ),
+                      child: Text(
+                        badge > 99 ? '99+' : '$badge',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 9.5,
+                          height: 1.25,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
             const SizedBox(height: 4),
             Text(

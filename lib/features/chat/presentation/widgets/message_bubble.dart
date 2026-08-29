@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../core/theme/app_colors.dart';
 import '../../data/chat_models.dart';
+import '../image_viewer.dart';
 
 /// One run of messages from the same person.
 ///
@@ -69,6 +73,20 @@ class _Bubble extends StatelessWidget {
       bottomRight: mine ? (last ? round : tight) : round,
     );
 
+    if (message.isImage) {
+      return Align(
+        alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+        child: _ImageBubble(message: message, radius: radius),
+      );
+    }
+
+    if (message.type == MessageType.file) {
+      return Align(
+        alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+        child: _FileBubble(message: message, radius: radius, mine: mine),
+      );
+    }
+
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
@@ -98,6 +116,277 @@ class _Bubble extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// A photo, with its caption underneath if there is one.
+///
+/// The image is the bubble rather than sitting inside one — padding around a
+/// photo wastes the width that makes it worth looking at. A caption gets a
+/// glass strip below it, which also gives the ticks somewhere legible to sit.
+class _ImageBubble extends StatelessWidget {
+  const _ImageBubble({required this.message, required this.radius});
+
+  final ChatMessage message;
+  final BorderRadius radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final attachment = message.attachment;
+    final path = message.localPath;
+    final width = MediaQuery.sizeOf(context).width * 0.66;
+    final hasCaption = message.body.isNotEmpty;
+
+    return GestureDetector(
+      onTap: attachment?.url == null && path == null
+          ? null
+          : () => openImageViewer(
+                context,
+                url: attachment?.url,
+                localPath: path,
+                caption: hasCaption ? message.body : null,
+              ),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: Container(
+          width: width,
+          color: Colors.white.withValues(alpha: 0.07),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AspectRatio(
+                // Reserved from the dimensions the server recorded, so the
+                // list does not jump as each image finishes loading.
+                aspectRatio: attachment?.aspect ?? 1,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _image(path, attachment?.url),
+                    if (message.pending)
+                      // Dimmed while it uploads. A spinner alone over a bright
+                      // photo is hard to see, and the dimming is what says
+                      // "not finished" at a glance.
+                      Container(
+                        color: Colors.black.withValues(alpha: 0.35),
+                        alignment: Alignment.center,
+                        child: const SizedBox(
+                          width: 26,
+                          height: 26,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.2,
+                            valueColor:
+                                AlwaysStoppedAnimation(Colors.white),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (hasCaption)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
+                  child: Text(
+                    message.body,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      height: 1.35,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _image(String? path, String? url) {
+    // Our own photo comes off the disk. Downloading back a copy of the file
+    // we just uploaded would be slower and cost the user data for nothing.
+    if (path != null && File(path).existsSync()) {
+      return Image.file(File(path), fit: BoxFit.cover);
+    }
+
+    if (url == null) return const _ImagePlaceholder();
+
+    return Image.network(
+      url,
+      fit: BoxFit.cover,
+      loadingBuilder: (context, child, progress) =>
+          progress == null ? child : const _ImagePlaceholder(),
+      // A signed link that has expired, or a file that has gone. Says so
+      // rather than showing Flutter's default broken-image glyph.
+      errorBuilder: (context, _, __) => const _ImagePlaceholder(failed: true),
+    );
+  }
+}
+
+/// A document: icon, name, size — and a caption underneath if there is one.
+class _FileBubble extends StatelessWidget {
+  const _FileBubble({
+    required this.message,
+    required this.radius,
+    required this.mine,
+  });
+
+  final ChatMessage message;
+  final BorderRadius radius;
+  final bool mine;
+
+  /// A glyph per family. Not decoration — it is what makes a list of
+  /// attachments scannable without reading every filename.
+  IconData get _icon {
+    final name = (message.attachment?.name ?? '').toLowerCase();
+
+    if (name.endsWith('.pdf')) return Icons.picture_as_pdf_rounded;
+    if (RegExp(r'\.(doc|docx|rtf|txt)$').hasMatch(name)) {
+      return Icons.article_rounded;
+    }
+    if (RegExp(r'\.(xls|xlsx|csv)$').hasMatch(name)) {
+      return Icons.table_chart_rounded;
+    }
+    if (RegExp(r'\.(zip|rar|7z|tar|gz)$').hasMatch(name)) {
+      return Icons.folder_zip_rounded;
+    }
+    if (RegExp(r'\.(mp3|m4a|wav|aac)$').hasMatch(name)) {
+      return Icons.audiotrack_rounded;
+    }
+    if (RegExp(r'\.(mp4|mov|mkv|avi)$').hasMatch(name)) {
+      return Icons.movie_rounded;
+    }
+
+    return Icons.insert_drive_file_rounded;
+  }
+
+  Future<void> _open() async {
+    final url = message.attachment?.url;
+
+    if (url == null) return;
+
+    // Handed to the OS rather than rendered in-app. A chat should not try to
+    // be a document viewer, and every phone already has better ones.
+    await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final attachment = message.attachment;
+    final hasCaption = message.body.isNotEmpty;
+    final ink = mine ? const Color(0xFF04121F) : AppColors.textPrimary;
+
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.sizeOf(context).width * 0.78,
+      ),
+      child: GestureDetector(
+        onTap: message.pending || attachment?.url == null ? null : _open,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 11, 14, 11),
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            gradient: mine ? AppColors.safeGradient : null,
+            color: mine ? null : Colors.white.withValues(alpha: 0.07),
+            border: mine
+                ? null
+                : Border.all(color: Colors.white.withValues(alpha: 0.09)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 38,
+                    height: 38,
+                    child: message.pending
+                        ? Center(
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation(
+                                  ink.withValues(alpha: 0.7),
+                                ),
+                              ),
+                            ),
+                          )
+                        : Container(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(10),
+                              color: ink.withValues(alpha: 0.12),
+                            ),
+                            child: Icon(_icon, size: 21, color: ink),
+                          ),
+                  ),
+                  const SizedBox(width: 11),
+                  Flexible(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          attachment?.name ?? 'File',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            height: 1.25,
+                            fontWeight: FontWeight.w600,
+                            color: ink,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          message.pending
+                              ? 'Sending…'
+                              : (attachment?.sizeLabel ?? ''),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: ink.withValues(alpha: 0.65),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              if (hasCaption) ...[
+                const SizedBox(height: 9),
+                Text(
+                  message.body,
+                  style: TextStyle(fontSize: 14, height: 1.35, color: ink),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ImagePlaceholder extends StatelessWidget {
+  const _ImagePlaceholder({this.failed = false});
+
+  final bool failed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white.withValues(alpha: 0.04),
+      alignment: Alignment.center,
+      child: Icon(
+        failed ? Icons.broken_image_outlined : Icons.image_outlined,
+        size: 30,
+        color: AppColors.textMuted.withValues(alpha: 0.5),
       ),
     );
   }
