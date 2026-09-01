@@ -50,6 +50,8 @@ class Attachment {
     this.width,
     this.height,
     this.url,
+    this.durationMs,
+    this.waveform,
   });
 
   final String id;
@@ -67,6 +69,14 @@ class Attachment {
 
   /// A signed, expiring link. Null only if the server declined to issue one.
   final String? url;
+
+  /// Voice notes: how long it runs, measured on the device that recorded it.
+  final int? durationMs;
+
+  /// Voice notes: the amplitude envelope, 0–100 per bar, also measured while
+  /// recording. Sent with the message so a bubble can draw the waveform
+  /// without downloading or decoding the audio.
+  final List<int>? waveform;
 
   bool get isImage => mime.startsWith('image/');
 
@@ -100,6 +110,11 @@ class Attachment {
         width: json['width'] as int?,
         height: json['height'] as int?,
         url: json['url'] as String?,
+        durationMs: json['duration_ms'] as int?,
+        waveform: (json['waveform'] as List<dynamic>?)
+            ?.whereType<num>()
+            .map((v) => v.toInt())
+            .toList(),
       );
 }
 

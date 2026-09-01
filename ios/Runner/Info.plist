@@ -2,6 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Shown verbatim in the system prompt. Vague wording here is a
+	     common App Store rejection, and is also just worse for the
+	     person deciding. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SFamily uses the microphone so you can send voice messages in your chats.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>SFamily uses the camera so you can take photos to send in your chats and set your profile picture.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SFamily needs access to your photos so you can send them in your chats and set your profile picture.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

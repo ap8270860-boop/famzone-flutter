@@ -8,6 +8,7 @@ import '../data/chat_api.dart';
 import '../data/chat_models.dart';
 import 'chat_store.dart';
 import 'realtime_client.dart';
+import 'voice_recorder.dart';
 
 /// One open conversation.
 ///
@@ -396,16 +397,65 @@ class ConversationStore extends ChangeNotifier {
     await _deliverMedia(local, id, filePath, MessageType.file);
   }
 
+  /// Send a voice note.
+  ///
+  /// The duration and waveform were measured while recording and travel with
+  /// the upload, so the receiving bubble is complete the moment the message
+  /// lands — no downloading, no decoding, nothing to compute on either
+  /// server or client.
+  Future<void> sendVoice(VoiceNote note) async {
+    final id = conversationId;
+
+    if (id == null) return;
+
+    _sendStoppedTyping();
+
+    final local = ChatMessage(
+      id: newClientId(),
+      body: '',
+      sentAt: DateTime.now(),
+      isMine: true,
+      state: DeliveryState.sending,
+      type: MessageType.audio,
+      localPath: note.path,
+      // Carries its own measurements from the start, so the bubble draws the
+      // real waveform while it uploads rather than a placeholder that jumps
+      // when the server answers.
+      attachment: Attachment(
+        id: '',
+        mime: 'audio/mp4',
+        durationMs: note.durationMs,
+        waveform: note.waveform,
+      ),
+    );
+
+    _pending.add(local);
+    _rebuild();
+
+    await _deliverMedia(
+      local,
+      id,
+      note.path,
+      MessageType.audio,
+      durationMs: note.durationMs,
+      waveform: note.waveform,
+    );
+  }
+
   Future<void> _deliverMedia(
     ChatMessage local,
     String conversationId,
     String filePath,
-    String type,
-  ) async {
+    String type, {
+    int? durationMs,
+    List<int>? waveform,
+  }) async {
     try {
       final upload = await _api.uploadAttachment(
         filePath: filePath,
         type: type,
+        durationMs: durationMs,
+        waveform: waveform,
       );
 
       if (!upload.success) {

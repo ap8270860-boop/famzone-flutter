@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../../../core/api/api_client.dart';
 import '../../../core/api/api_response.dart';
 
@@ -109,12 +111,22 @@ class ChatApi {
   Future<ApiResponse> uploadAttachment({
     required String filePath,
     required String type,
+    int? durationMs,
+    List<int>? waveform,
   }) =>
       _api.upload(
         'uploads',
         field: 'file',
         filePath: filePath,
-        fields: {'type': type},
+        fields: {
+          'type': type,
+          // Voice notes carry their own measurements. Multipart fields are
+          // strings, so the waveform travels as JSON and the server decodes
+          // it before validating.
+          if (durationMs != null) 'duration_ms': '$durationMs',
+          if (waveform != null && waveform.isNotEmpty)
+            'waveform': jsonEncode(waveform),
+        },
       );
 
   /// Send. [clientId] is what makes a retry safe — the same id twice returns

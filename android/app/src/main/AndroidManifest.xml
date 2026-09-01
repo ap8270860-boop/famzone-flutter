@@ -2,6 +2,12 @@
     <!-- Required for all API calls to the FamZone backend. -->
     <uses-permission android:name="android.permission.INTERNET"/>
 
+    <!-- Voice notes. Requested at the moment of the first recording,
+         not at launch: a microphone prompt on a safety app's first
+         run, before anything has explained why, is a prompt people
+         decline. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+
     <application
         android:label="SFamily"
         android:name="${applicationName}"

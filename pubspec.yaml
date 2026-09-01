@@ -49,6 +49,18 @@ dependencies:
   file_picker: 8.3.7
   url_launcher: ^6.3.2
 
+  # Voice notes.
+  #
+  # record captures and reports the input level for the live
+  # waveform; just_audio plays back with seeking and speed;
+  # audio_session is what stops iOS routing playback to the earpiece
+  # after a recording; path_provider gives the temp file a home,
+  # which record requires explicitly from v5 on.
+  record: ^7.1.1
+  just_audio: ^0.10.6
+  audio_session: ^0.2.4
+  path_provider: ^2.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

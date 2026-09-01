@@ -16,11 +16,14 @@ import '../../people/presentation/widgets/person_avatar.dart';
 import '../data/chat_models.dart';
 import '../state/conversation_store.dart';
 import '../state/realtime_client.dart';
+import '../state/voice_player.dart';
+import '../state/voice_recorder.dart';
 import 'attachment_preview_screen.dart';
 import 'forward_sheet.dart';
 import 'widgets/attach_sheet.dart';
 import 'widgets/message_menu.dart';
 import 'widgets/message_bubble.dart';
+import 'widgets/voice_recorder_bar.dart';
 
 /// A one-to-one conversation.
 ///
@@ -94,6 +97,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// The message just jumped to, tinted briefly.
   String? _highlightedId;
   Timer? _highlight;
+
+  /// Recording a voice note. One per screen, disposed with it — leaving mid
+  /// recording has to release the microphone.
+  final VoiceRecorder _voice = VoiceRecorder();
+
+  /// How far the finger has slid from the microphone, 0–1 of the way to
+  /// cancelling (left) and to locking (up).
+  double _slide = 0;
+  double _lockProgress = 0;
+
+  /// How far the finger must travel for each. Cancel is the longer of the
+  /// two on purpose: it is the one that destroys something.
+  static const double _cancelDistance = 110;
+  static const double _lockDistance = 70;
 
   /// Whether the thread is parked at the newest message. Drives the jump
   /// button, which has no reason to exist while you are already there.
@@ -190,6 +207,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _highlight?.cancel();
     _store.removeListener(_syncUnseen);
+
+    // Both matter on the way out: a recorder left running holds the
+    // microphone, and a voice note left playing follows you to the next
+    // screen with no way to stop it.
+    _voice.dispose();
+    VoicePlayer.instance.stop();
+
     _controller.dispose();
     _focus.dispose();
     _scroll.dispose();
@@ -369,6 +393,114 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     } else {
       AppToast.error(context, 'Could not forward that.');
     }
+  }
+
+  /*
+  |----------------------------------------------------------------------------
+  | Voice notes
+  |----------------------------------------------------------------------------
+  |
+  | Hold to record, release to send. Slide left to cancel, slide up to lock
+  | into hands-free. The gesture lives on the microphone button, which is why
+  | the composer keeps that button mounted while recording — a GestureDetector
+  | disposed mid-press never delivers its end event, and the recording would
+  | run until the screen closed.
+  */
+
+  Future<void> _startRecording() async {
+    // Nothing to record over: a half-typed message means they meant to type.
+    if (_canSend) return;
+
+    setState(() {
+      _slide = 0;
+      _lockProgress = 0;
+    });
+
+    final started = await _voice.start();
+
+    if (!started && mounted) {
+      AppToast.error(
+        context,
+        'SFamily needs microphone access to record a voice note.',
+      );
+    }
+  }
+
+  /// The finger moving while the note records.
+  void _onMicMove(Offset offset) {
+    if (!_voice.isActive || _voice.isLocked) return;
+
+    final slide = (-offset.dx / _cancelDistance).clamp(0.0, 1.0);
+    final lock = (-offset.dy / _lockDistance).clamp(0.0, 1.0);
+
+    if (slide >= 1) {
+      _cancelRecording();
+
+      return;
+    }
+
+    if (lock >= 1) {
+      _voice.lock();
+
+      setState(() {
+        _slide = 0;
+        _lockProgress = 0;
+      });
+
+      return;
+    }
+
+    setState(() {
+      _slide = slide;
+      _lockProgress = lock;
+    });
+  }
+
+  /// Finger lifted. Locked recordings keep going; everything else is sent.
+  Future<void> _finishRecording() async {
+    if (!_voice.isActive || _voice.isLocked) return;
+
+    await _sendRecording();
+  }
+
+  Future<void> _sendRecording() async {
+    final note = await _voice.stop();
+
+    if (!mounted) return;
+
+    setState(() {
+      _slide = 0;
+      _lockProgress = 0;
+    });
+
+    if (note == null) {
+      // Too short to be a message. Said out loud, because a press that
+      // produces nothing otherwise reads as a broken button.
+      AppToast.error(context, 'Hold the microphone to record.');
+
+      return;
+    }
+
+    _scrollToLatest();
+
+    await _store.sendVoice(note);
+  }
+
+  Future<void> _cancelRecording() async {
+    await _voice.cancel();
+
+    if (!mounted) return;
+
+    setState(() {
+      _slide = 0;
+      _lockProgress = 0;
+    });
+  }
+
+  void _micHint() {
+    if (_voice.isActive) return;
+
+    AppToast.error(context, 'Hold the microphone to record.');
   }
 
   /// Tapping the quoted strip inside a reply.
@@ -823,12 +955,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         message: _store.replyingTo!,
                         onCancel: _store.cancelReply,
                       ),
-                    _Composer(
-                      controller: _controller,
-                      focus: _focus,
-                      canSend: _canSend,
-                      onSend: _send,
-                      onAttach: _attach,
+                    AnimatedBuilder(
+                      animation: _voice,
+                      builder: (context, _) => _Composer(
+                        controller: _controller,
+                        focus: _focus,
+                        canSend: _canSend,
+                        onSend: _send,
+                        onAttach: _attach,
+                        recorder: _voice,
+                        slide: _slide,
+                        lockProgress: _lockProgress,
+                        onMicDown: _startRecording,
+                        onMicMove: _onMicMove,
+                        onMicUp: _finishRecording,
+                        onMicTap: _micHint,
+                        onCancel: _cancelRecording,
+                        onStopLocked: _sendRecording,
+                      ),
                     ),
                   ],
                 ],
@@ -1769,6 +1913,15 @@ class _Composer extends StatelessWidget {
     required this.canSend,
     required this.onSend,
     required this.onAttach,
+    required this.recorder,
+    required this.slide,
+    required this.lockProgress,
+    required this.onMicDown,
+    required this.onMicMove,
+    required this.onMicUp,
+    required this.onMicTap,
+    required this.onCancel,
+    required this.onStopLocked,
   });
 
   final TextEditingController controller;
@@ -1776,6 +1929,16 @@ class _Composer extends StatelessWidget {
   final bool canSend;
   final VoidCallback onSend;
   final VoidCallback onAttach;
+
+  final VoiceRecorder recorder;
+  final double slide;
+  final double lockProgress;
+  final VoidCallback onMicDown;
+  final void Function(Offset offset) onMicMove;
+  final VoidCallback onMicUp;
+  final VoidCallback onMicTap;
+  final VoidCallback onCancel;
+  final VoidCallback onStopLocked;
 
   @override
   Widget build(BuildContext context) {
@@ -1796,67 +1959,181 @@ class _Composer extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Expanded(
-                child: Container(
-                  constraints: const BoxConstraints(minHeight: 46),
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(23),
-                    color: Colors.white.withValues(alpha: 0.06),
-                    border:
-                        Border.all(color: Colors.white.withValues(alpha: 0.11)),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.add_rounded,
-                            size: 22, color: AppColors.textMuted),
-                        tooltip: 'Attach',
-                        onPressed: onAttach,
-                      ),
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          child: TextField(
-                            controller: controller,
-                            focusNode: focus,
-                            // Grows to five lines then scrolls, so a long
-                            // message never swallows the conversation.
-                            minLines: 1,
-                            maxLines: 5,
-                            textCapitalization: TextCapitalization.sentences,
-                            keyboardType: TextInputType.multiline,
-                            textInputAction: TextInputAction.newline,
-                            style: const TextStyle(
-                              fontSize: 14.5,
-                              height: 1.35,
-                              color: AppColors.textPrimary,
-                            ),
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              border: InputBorder.none,
-                              hintText: 'Message…',
-                              hintStyle: TextStyle(
-                                fontSize: 14.5,
-                                color: AppColors.textMuted,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      // No second camera button in the field. Everything that
-                      // attaches now lives behind +, so the text field is for
-                      // typing and nothing else.
-                    ],
-                  ),
-                ),
+                child: recorder.isActive
+                    ? VoiceRecorderStrip(
+                        recorder: recorder,
+                        slide: slide,
+                        onCancel: onCancel,
+                      )
+                    : _field(),
               ),
               const SizedBox(width: 9),
-              _SendButton(enabled: canSend, onTap: onSend),
+
+              // One position, three jobs. The microphone must keep its place
+              // in the tree while recording — it owns the long press.
+              if (canSend)
+                _SendButton(enabled: true, onTap: onSend)
+              else
+                _MicButton(
+                  recorder: recorder,
+                  lockProgress: lockProgress,
+                  onDown: onMicDown,
+                  onMove: onMicMove,
+                  onUp: onMicUp,
+                  onTap: onMicTap,
+                  onStopLocked: onStopLocked,
+                ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _field() {
+    return Container(
+      constraints: const BoxConstraints(minHeight: 46),
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(23),
+        color: Colors.white.withValues(alpha: 0.06),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.11)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.add_rounded,
+                size: 22, color: AppColors.textMuted),
+            tooltip: 'Attach',
+            onPressed: onAttach,
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: TextField(
+                controller: controller,
+                focusNode: focus,
+                // Grows to five lines then scrolls, so a long message never
+                // swallows the conversation.
+                minLines: 1,
+                maxLines: 5,
+                textCapitalization: TextCapitalization.sentences,
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
+                style: const TextStyle(
+                  fontSize: 14.5,
+                  height: 1.35,
+                  color: AppColors.textPrimary,
+                ),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: InputBorder.none,
+                  hintText: 'Message…',
+                  hintStyle: TextStyle(
+                    fontSize: 14.5,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // No second camera button in the field. Everything that attaches
+          // lives behind +, so the text field is for typing and nothing else.
+        ],
+      ),
+    );
+  }
+}
+
+/// Hold to record.
+///
+/// Also the stop button once locked, which is why it is one widget rather
+/// than two swapped in and out: the gesture must survive the transition into
+/// hands-free mode without the detector being rebuilt underneath the finger.
+class _MicButton extends StatelessWidget {
+  const _MicButton({
+    required this.recorder,
+    required this.lockProgress,
+    required this.onDown,
+    required this.onMove,
+    required this.onUp,
+    required this.onTap,
+    required this.onStopLocked,
+  });
+
+  final VoiceRecorder recorder;
+  final double lockProgress;
+  final VoidCallback onDown;
+  final void Function(Offset offset) onMove;
+  final VoidCallback onUp;
+  final VoidCallback onTap;
+  final VoidCallback onStopLocked;
+
+  @override
+  Widget build(BuildContext context) {
+    final recording = recorder.isActive;
+    final locked = recorder.isLocked;
+
+    return Stack(
+      clipBehavior: Clip.none,
+      alignment: Alignment.center,
+      children: [
+        // The lock target, floating above the button while the finger is
+        // still down. Positioned outside the button's own bounds, which is
+        // why the Stack does not clip.
+        if (recording && !locked)
+          Positioned(
+            bottom: 54,
+            child: VoiceLockChip(progress: lockProgress),
+          ),
+
+        GestureDetector(
+          // A locked recording is stopped by a tap, not a press.
+          onTap: locked ? onStopLocked : onTap,
+          onLongPressStart: locked ? null : (_) => onDown(),
+          onLongPressMoveUpdate:
+              locked ? null : (details) => onMove(details.offsetFromOrigin),
+          onLongPressEnd: locked ? null : (_) => onUp(),
+
+          // Covers the finger leaving the screen edge or the press being
+          // interrupted — without it a recording can be left running with
+          // nothing on screen to stop it.
+          onLongPressCancel: locked ? null : onUp,
+          behavior: HitTestBehavior.opaque,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            width: recording ? 52 : 46,
+            height: recording ? 52 : 46,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: recording ? AppColors.safeGradient : null,
+              color: recording ? null : Colors.white.withValues(alpha: 0.06),
+              boxShadow: recording
+                  ? [
+                      BoxShadow(
+                        color: AppColors.mint.withValues(alpha: 0.35),
+                        blurRadius: 20,
+                        offset: const Offset(0, 5),
+                      ),
+                    ]
+                  : const [],
+            ),
+            child: Icon(
+              locked
+                  ? Icons.stop_rounded
+                  : recording
+                      ? Icons.mic_rounded
+                      : Icons.mic_none_rounded,
+              size: recording ? 24 : 21,
+              color: recording
+                  ? const Color(0xFF04121F)
+                  : AppColors.textMuted.withValues(alpha: 0.9),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
