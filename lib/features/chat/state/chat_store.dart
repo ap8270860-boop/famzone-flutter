@@ -34,6 +34,11 @@ class ChatStore extends ChangeNotifier {
   int _unread = 0;
   int _requestCount = 0;
 
+  /// How many threads are put away. Only a count — the Archived screen
+  /// fetches its own page, because a list nobody is looking at has no
+  /// business being held in memory for the whole session.
+  int _archivedCount = 0;
+
   bool _loading = false;
   bool _loaded = false;
   String? _error;
@@ -43,6 +48,7 @@ class ChatStore extends ChangeNotifier {
 
   int get unread => _unread;
   int get requestCount => _requestCount;
+  int get archivedCount => _archivedCount;
 
   /// True only for the very first load. A refresh over existing threads must
   /// not blank the list out.
@@ -105,6 +111,7 @@ class ChatStore extends ChangeNotifier {
 
       _unread = res.dataMap['unread'] as int? ?? 0;
       _requestCount = res.dataMap['requests'] as int? ?? 0;
+      _archivedCount = res.dataMap['archived'] as int? ?? 0;
 
       notifyListeners();
     } catch (_) {
@@ -154,10 +161,25 @@ class ChatStore extends ChangeNotifier {
   /// the preview changes the moment the message lands rather than on the
   /// next refresh.
   void absorb(Conversation conversation) {
-    final next = [
+    _threads = _sorted([
       conversation,
       ..._threads.where((t) => t.id != conversation.id),
-    ]..sort((a, b) {
+    ]);
+
+    _recount();
+    notifyListeners();
+  }
+
+  /// Pinned chats first, then newest.
+  ///
+  /// The same order the server sorts by, repeated here because the list is
+  /// rearranged locally on every send and every socket frame — if the two
+  /// disagreed, a pinned chat would fall down the list until the next
+  /// refresh put it back, which looks like a bug on both ends.
+  List<Conversation> _sorted(List<Conversation> threads) {
+    return [...threads]..sort((a, b) {
+        if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+
         final at = a.lastMessageAt;
         final bt = b.lastMessageAt;
 
@@ -167,10 +189,152 @@ class ChatStore extends ChangeNotifier {
 
         return bt.compareTo(at);
       });
+  }
 
-    _threads = next;
+  /// Swap one thread for an edited copy of itself, keeping the order right.
+  void _replace(String id, Conversation Function(Conversation) edit) {
+    _threads = _sorted([
+      for (final thread in _threads) thread.id == id ? edit(thread) : thread,
+    ]);
+
     _recount();
     notifyListeners();
+  }
+
+  /*
+  |----------------------------------------------------------------------------
+  | My own view of a thread
+  |----------------------------------------------------------------------------
+  |
+  | Each one flips the row first and asks the server second. They are all
+  | small, private, reversible writes — waiting on a round trip to move a
+  | chat to the top of a list makes the tap feel broken.
+  */
+
+  Future<bool> pinChat(Conversation thread) =>
+      _apply(thread, (t) => t.copyWith(pinned: !t.pinned),
+          () => _api.pinChat(thread.id));
+
+  Future<bool> mute(Conversation thread, {int? hours}) => _apply(
+        thread,
+        (t) => t.copyWith(muted: !t.muted),
+        () => _api.mute(thread.id, muted: !thread.muted, hours: hours),
+      );
+
+  Future<bool> markUnread(Conversation thread) => _apply(
+        thread,
+        (t) => t.copyWith(markedUnread: true),
+        () => _api.markUnread(thread.id),
+      );
+
+  /// Empty a thread on this side. The row stays, with nothing to preview.
+  Future<bool> clearChat(Conversation thread) => _apply(
+        thread,
+        (t) => t.copyWith(
+          unreadCount: 0,
+          markedUnread: false,
+          clearLastMessage: true,
+        ),
+        () => _api.clearChat(thread.id),
+      );
+
+  /// Put a thread away, or bring it back.
+  ///
+  /// The row leaves the list it is in either way, so this cannot go through
+  /// [_apply] — there is nothing left in the list to edit. Archiving from
+  /// the inbox removes it; unarchiving from the Archived screen is the same
+  /// call and the inbox picks it up on its next refresh.
+  Future<bool> archive(Conversation thread) async {
+    final threads = [..._threads];
+    final count = _archivedCount;
+
+    _threads = _threads.where((t) => t.id != thread.id).toList();
+    _archivedCount = thread.archived ? count - 1 : count + 1;
+
+    _recount();
+    notifyListeners();
+
+    try {
+      final res = await _api.archiveChat(thread.id);
+
+      if (!res.success) {
+        _threads = threads;
+        _archivedCount = count;
+
+        _recount();
+        notifyListeners();
+      }
+
+      return res.success;
+    } catch (_) {
+      _threads = threads;
+      _archivedCount = count;
+
+      _recount();
+      notifyListeners();
+
+      return false;
+    }
+  }
+
+  /// Leave a thread from the inbox — the same endpoint that declines a
+  /// request, because they are the same act.
+  ///
+  /// The membership row survives on the server with `left_at` set, so a
+  /// later message from them reopens this same conversation rather than
+  /// starting a second one beside it with half the history missing.
+  Future<bool> leave(Conversation thread) async {
+    final threads = [..._threads];
+    final requests = [..._requests];
+
+    removeThread(thread.id);
+
+    try {
+      final res = await _api.leave(thread.id);
+
+      if (!res.success) _restore(threads, requests);
+
+      return res.success;
+    } catch (_) {
+      _restore(threads, requests);
+
+      return false;
+    }
+  }
+
+  void _restore(List<Conversation> threads, List<Conversation> requests) {
+    _threads = threads;
+    _requests = requests;
+    _requestCount = requests.length;
+
+    _recount();
+    notifyListeners();
+  }
+
+  /// Apply a local edit, call the server, and put it back if it refused.
+  Future<bool> _apply(
+    Conversation thread,
+    Conversation Function(Conversation) edit,
+    Future<ApiResponse> Function() call,
+  ) async {
+    final before = _threads.firstWhere(
+      (t) => t.id == thread.id,
+      orElse: () => thread,
+    );
+
+    _replace(thread.id, edit);
+
+    try {
+      final res = await call();
+
+      if (!res.success) _replace(thread.id, (_) => before);
+
+      return res.success;
+    } catch (_) {
+      _replace(thread.id, (_) => before);
+
+      return false;
+    }
   }
 
   /// Drop a thread from both lists.
@@ -192,7 +356,11 @@ class ChatStore extends ChangeNotifier {
   void clearUnread(String conversationId) {
     _threads = [
       for (final thread in _threads)
-        thread.id == conversationId ? thread.copyWith(unreadCount: 0) : thread,
+        thread.id == conversationId
+            // Opening it undoes "mark as unread" as well, the same way the
+            // receipt endpoint does on the server.
+            ? thread.copyWith(unreadCount: 0, markedUnread: false)
+            : thread,
     ];
 
     _recount();
@@ -200,7 +368,19 @@ class ChatStore extends ChangeNotifier {
   }
 
   void _recount() {
-    _unread = _threads.fold(0, (sum, thread) => sum + thread.unreadCount);
+    // A thread marked unread counts as one, matching how the server totals
+    // the badge — otherwise the dot on the row and the number on the tab
+    // disagree until the next refresh.
+    _unread = _threads.fold(
+      0,
+      (sum, thread) =>
+          sum +
+          (thread.unreadCount > 0
+              ? thread.unreadCount
+              : thread.markedUnread
+                  ? 1
+                  : 0),
+    );
   }
 
   /// Fold a live `inbox.updated` frame into the list.

@@ -103,6 +103,90 @@ class Attachment {
       );
 }
 
+/// One emoji on a message, and who put it there.
+@immutable
+class Reaction {
+  const Reaction({
+    required this.emoji,
+    required this.count,
+    required this.userIds,
+  });
+
+  final String emoji;
+  final int count;
+
+  /// Public ids of everyone who reacted with this emoji.
+  ///
+  /// Sent instead of a `mine` flag so one payload serves both people — the
+  /// client works out which reaction is its own. A per-viewer payload would
+  /// mean one broadcast per participant for a fact anybody can derive.
+  final List<String> userIds;
+
+  bool mine(String meId) => userIds.contains(meId);
+
+  factory Reaction.fromJson(Map<String, dynamic> json) => Reaction(
+        emoji: json['emoji'] as String? ?? '',
+        count: json['count'] as int? ?? 0,
+        userIds: (json['user_ids'] as List<dynamic>? ?? const [])
+            .map((id) => '$id')
+            .toList(),
+      );
+}
+
+/// The emoji the long-press row offers.
+///
+/// Fixed and short on purpose. Six covers nearly every reaction anybody
+/// sends, and a full picker turns a one-tap gesture into a search. Kept in
+/// step with ReactionService::QUICK on the server.
+const List<String> kQuickReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+/// The message a reply is answering, in the compact form a quote needs.
+///
+/// Not a full [ChatMessage] on purpose: a quote needs enough to recognise the
+/// original and nothing more, and nesting whole messages would let one deep
+/// reply chain drag half a conversation onto the wire.
+@immutable
+class QuotedMessage {
+  const QuotedMessage({
+    required this.id,
+    required this.isMine,
+    this.body,
+    this.type = MessageType.text,
+    this.deleted = false,
+  });
+
+  final String id;
+  final bool isMine;
+  final String? body;
+  final String type;
+  final bool deleted;
+
+  /// One line describing what was quoted.
+  String get preview {
+    if (deleted) return 'Message deleted';
+
+    final text = body ?? '';
+
+    if (text.isNotEmpty) return text;
+
+    return switch (type) {
+      MessageType.image => 'Photo',
+      MessageType.file => 'File',
+      MessageType.audio => 'Voice message',
+      _ => '',
+    };
+  }
+
+  factory QuotedMessage.fromJson(Map<String, dynamic> json, String meId) =>
+      QuotedMessage(
+        id: json['id'] as String? ?? '',
+        isMine: json['sender_id'] == meId,
+        body: json['body'] as String?,
+        type: json['type'] as String? ?? MessageType.text,
+        deleted: json['deleted'] as bool? ?? false,
+      );
+}
+
 /// One message in a conversation.
 @immutable
 class ChatMessage {
@@ -118,6 +202,10 @@ class ChatMessage {
     this.type = MessageType.text,
     this.attachment,
     this.localPath,
+    this.replyTo,
+    this.reactions = const [],
+    this.starred = false,
+    this.forwarded = false,
   });
 
   /// The client-generated id, stable from the moment the message is typed.
@@ -156,6 +244,20 @@ class ChatMessage {
   final String type;
 
   final Attachment? attachment;
+
+  /// What this message is answering, if anything.
+  final QuotedMessage? replyTo;
+
+  /// Emoji on this message, most-reacted first.
+  final List<Reaction> reactions;
+
+  /// Whether *you* kept it. Private — the other person cannot tell.
+  final bool starred;
+
+  /// Whether it arrived here from another conversation. A flag, not a
+  /// pointer: the label only needs to say so, and recording where it came
+  /// from would leak a thread the reader is not in.
+  final bool forwarded;
 
   /// The file on this device, for something we sent ourselves.
   ///
@@ -228,6 +330,16 @@ class ChatMessage {
       attachment: json['attachment'] is Map<String, dynamic>
           ? Attachment.fromJson(json['attachment'] as Map<String, dynamic>)
           : null,
+      replyTo: json['reply_to'] is Map<String, dynamic>
+          ? QuotedMessage.fromJson(
+              json['reply_to'] as Map<String, dynamic>, meId)
+          : null,
+      reactions: (json['reactions'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(Reaction.fromJson)
+          .toList(),
+      starred: json['starred'] as bool? ?? false,
+      forwarded: json['forwarded'] as bool? ?? false,
     );
   }
 
@@ -238,6 +350,9 @@ class ChatMessage {
     bool? deleted,
     Attachment? attachment,
     String? localPath,
+    QuotedMessage? replyTo,
+    List<Reaction>? reactions,
+    bool? starred,
   }) =>
       ChatMessage(
         id: id,
@@ -254,6 +369,10 @@ class ChatMessage {
         // still want to render our own photo from disk rather than fetch it
         // back over the network.
         localPath: localPath ?? this.localPath,
+        replyTo: replyTo ?? this.replyTo,
+        reactions: reactions ?? this.reactions,
+        starred: starred ?? this.starred,
+        forwarded: forwarded,
       );
 }
 
@@ -373,6 +492,10 @@ class Conversation {
     this.lastMessageAt,
     this.myReadSeq = 0,
     this.myDeliveredSeq = 0,
+    this.pinnedMessage,
+    this.pinned = false,
+    this.markedUnread = false,
+    this.archived = false,
   });
 
   final String id;
@@ -397,11 +520,30 @@ class Conversation {
   final ChatMessage? lastMessage;
   final DateTime? lastMessageAt;
 
+  /// Shared by both people, unlike a star — either can set or clear it and
+  /// both banners move together.
+  final ChatMessage? pinnedMessage;
+
+  /// Held at the top of *my* inbox. Mine alone: it says nothing about where
+  /// this thread sits in theirs, unlike [pinnedMessage].
+  final bool pinned;
+
+  /// "I have read this but I want it to look unread." A flag of my own —
+  /// the read watermark never moves backwards, so their ticks stay put.
+  final bool markedUnread;
+
+  /// Put away in the Archived list. Not deleted and not muted: every message
+  /// is still there and it still notifies — it is only somewhere else.
+  final bool archived;
+
   final int myReadSeq;
   final int myDeliveredSeq;
 
   bool get isRequest => state == 'pending';
-  bool get hasUnread => unreadCount > 0;
+
+  /// Either genuinely unread, or marked so on purpose. The row cannot tell
+  /// the difference and should not try to — both mean "come back to this".
+  bool get hasUnread => unreadCount > 0 || markedUnread;
 
   /// One line of preview for the inbox row.
   String get preview {
@@ -442,6 +584,13 @@ class Conversation {
           DateTime.tryParse(json['last_message_at'] as String? ?? ''),
       myReadSeq: me['last_read_seq'] as int? ?? 0,
       myDeliveredSeq: me['last_delivered_seq'] as int? ?? 0,
+      pinnedMessage: json['pinned_message'] is Map<String, dynamic>
+          ? ChatMessage.fromJson(
+              json['pinned_message'] as Map<String, dynamic>, meId)
+          : null,
+      pinned: json['pinned'] as bool? ?? false,
+      markedUnread: json['marked_unread'] as bool? ?? false,
+      archived: json['archived'] as bool? ?? false,
     );
   }
 
@@ -450,21 +599,36 @@ class Conversation {
     String? state,
     int? unreadCount,
     bool? blocked,
+    bool? muted,
+    bool? pinned,
+    bool? markedUnread,
+    bool? archived,
     ChatMessage? lastMessage,
     DateTime? lastMessageAt,
     int? myReadSeq,
+    ChatMessage? pinnedMessage,
+    bool clearPin = false,
+    bool clearLastMessage = false,
   }) =>
       Conversation(
         id: id,
         other: other ?? this.other,
         state: state ?? this.state,
         unreadCount: unreadCount ?? this.unreadCount,
-        muted: muted,
+        muted: muted ?? this.muted,
         blocked: blocked ?? this.blocked,
-        lastMessage: lastMessage ?? this.lastMessage,
+        // Cleared outright when a chat is emptied: the thread stays in the
+        // list with nothing left to preview.
+        lastMessage: clearLastMessage ? null : (lastMessage ?? this.lastMessage),
         lastMessageAt: lastMessageAt ?? this.lastMessageAt,
         myReadSeq: myReadSeq ?? this.myReadSeq,
         myDeliveredSeq: myDeliveredSeq,
+        // An explicit flag, because null means "unchanged" everywhere else
+        // in this method and unpinning has to be expressible.
+        pinnedMessage: clearPin ? null : (pinnedMessage ?? this.pinnedMessage),
+        pinned: pinned ?? this.pinned,
+        markedUnread: markedUnread ?? this.markedUnread,
+        archived: archived ?? this.archived,
       );
 
   /// "19:04", "Yesterday", "12 Aug" — the right-hand column of an inbox row.

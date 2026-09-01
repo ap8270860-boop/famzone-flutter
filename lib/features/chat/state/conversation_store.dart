@@ -68,6 +68,9 @@ class ConversationStore extends ChangeNotifier {
   /// Set when a block closes this thread while it is open.
   bool _closed = false;
 
+  /// The message being replied to, while the composer holds a reply.
+  ChatMessage? _replyingTo;
+
   Conversation? get conversation => _conversation;
   ChatPerson? get person => _conversation?.other;
   List<ChatMessage> get messages => _view;
@@ -82,6 +85,22 @@ class ConversationStore extends ChangeNotifier {
   bool get awaitingAcceptance => _conversation?.other?.hasAccepted == false;
 
   bool get peerTyping => _peerTyping;
+
+  ChatMessage? get replyingTo => _replyingTo;
+
+  void startReply(ChatMessage message) {
+    if (message.deleted) return;
+
+    _replyingTo = message;
+    _rebuild();
+  }
+
+  void cancelReply() {
+    if (_replyingTo == null) return;
+
+    _replyingTo = null;
+    _rebuild();
+  }
 
   /// Whether a wall stands between the two of you.
   ///
@@ -107,6 +126,9 @@ class ConversationStore extends ChangeNotifier {
   }
 
   String get _meId => Session.instance.user?.id ?? '';
+
+  /// Exposed so the list can tell your own reaction from theirs.
+  String get meId => _meId;
 
   int get _newestSeq => _sent.isEmpty ? 0 : _sent.last.seq;
   int get _oldestSeq => _sent.isEmpty ? 0 : _sent.first.seq;
@@ -268,12 +290,30 @@ class ConversationStore extends ChangeNotifier {
 
     if (text.isEmpty || id == null) return;
 
+    // Captured before the bubble is built and cleared straight away: the
+    // reply belongs to this message, and leaving the strip up would silently
+    // attach it to the next one as well.
+    final replyTo = _replyingTo;
+
+    _replyingTo = null;
+
     final local = ChatMessage(
       id: newClientId(),
       body: text,
       sentAt: DateTime.now(),
       isMine: true,
       state: DeliveryState.sending,
+      // Quoted locally too, so the reply reads correctly the instant it
+      // appears rather than only once the server echoes it back.
+      replyTo: replyTo == null
+          ? null
+          : QuotedMessage(
+              id: replyTo.remoteId ?? '',
+              isMine: replyTo.isMine,
+              body: replyTo.body,
+              type: replyTo.type,
+              deleted: replyTo.deleted,
+            ),
     );
 
     // Sending ends typing. Without this the indicator lingers on the other
@@ -284,7 +324,7 @@ class ConversationStore extends ChangeNotifier {
     _pending.add(local);
     _rebuild();
 
-    await _deliver(local, id);
+    await _deliver(local, id, replyToId: replyTo?.remoteId);
   }
 
   /// Send a photo, with an optional caption.
@@ -456,15 +496,20 @@ class ConversationStore extends ChangeNotifier {
       return;
     }
 
-    await _deliver(retry, id);
+    await _deliver(retry, id, replyToId: retry.replyTo?.id);
   }
 
-  Future<void> _deliver(ChatMessage local, String conversationId) async {
+  Future<void> _deliver(
+    ChatMessage local,
+    String conversationId, {
+    String? replyToId,
+  }) async {
     try {
       final res = await _api.send(
         conversationId,
         clientId: local.id,
         body: local.body,
+        replyToId: replyToId,
       );
 
       if (!res.success) {
@@ -514,6 +559,248 @@ class ConversationStore extends ChangeNotifier {
   | Requests
   |----------------------------------------------------------------------------
   */
+
+  /// Add, change or remove your reaction.
+  ///
+  /// Applied locally first. A tap on an emoji has to feel instant — waiting
+  /// on a round trip before the pill appears makes the gesture feel broken
+  /// even when it is working.
+  Future<void> react(ChatMessage message, String emoji) async {
+    final remoteId = message.remoteId;
+
+    if (remoteId == null) return;
+
+    final before = message;
+
+    _upsert(message.copyWith(
+      reactions: _toggled(message.reactions, emoji),
+    ));
+
+    _rebuild();
+
+    try {
+      final res = await _api.react(remoteId, emoji);
+
+      if (res.success && res.dataMap.isNotEmpty) {
+        // Reconciled from the server, which is the only party that knows
+        // what the other person did in the meantime.
+        _upsert(
+          ChatMessage.fromJson(res.dataMap, _meId)
+              .copyWith(localPath: before.localPath),
+        );
+      } else {
+        _upsert(before);
+      }
+    } catch (_) {
+      _upsert(before);
+    } finally {
+      _rebuild();
+    }
+  }
+
+  /// One reaction per person: adding one removes whatever you had, and
+  /// tapping the one you already have takes it off.
+  List<Reaction> _toggled(List<Reaction> current, String emoji) {
+    final removing = current.any((r) => r.emoji == emoji && r.mine(_meId));
+
+    // Strip yourself out of everything first — the server enforces one row
+    // per person, so any local state showing you twice is already wrong.
+    final stripped = current
+        .map((r) => Reaction(
+              emoji: r.emoji,
+              count: r.userIds.contains(_meId) ? r.count - 1 : r.count,
+              userIds: r.userIds.where((id) => id != _meId).toList(),
+            ))
+        .where((r) => r.count > 0)
+        .toList();
+
+    if (removing) return stripped;
+
+    final index = stripped.indexWhere((r) => r.emoji == emoji);
+
+    if (index >= 0) {
+      final existing = stripped[index];
+
+      stripped[index] = Reaction(
+        emoji: emoji,
+        count: existing.count + 1,
+        userIds: [...existing.userIds, _meId],
+      );
+    } else {
+      stripped.add(Reaction(emoji: emoji, count: 1, userIds: [_meId]));
+    }
+
+    return stripped;
+  }
+
+  /// Keep a message, or stop keeping it.
+  ///
+  /// Private: nothing is broadcast, and the other person has no way to learn
+  /// you kept something of theirs.
+  Future<void> toggleStar(ChatMessage message) async {
+    final remoteId = message.remoteId;
+
+    if (remoteId == null) return;
+
+    // Flipped locally first — a star is a one-tap gesture and waiting on a
+    // round trip makes it feel like it did not register.
+    _upsert(message.copyWith(starred: !message.starred));
+    _rebuild();
+
+    try {
+      final res = await _api.star(remoteId);
+
+      if (res.success) {
+        _upsert(message.copyWith(
+          starred: res.dataMap['starred'] as bool? ?? !message.starred,
+        ));
+      } else {
+        _upsert(message);
+      }
+    } catch (_) {
+      _upsert(message);
+    } finally {
+      _rebuild();
+    }
+  }
+
+  /// Pin a message in this thread, or clear the pin.
+  ///
+  /// Shared by both people. The server broadcasts the change, but the local
+  /// update happens straight away so the banner does not wait on the socket.
+  Future<bool> pin(ChatMessage? message) async {
+    final id = conversationId;
+
+    if (id == null) return false;
+
+    final before = _conversation;
+
+    _conversation = _conversation?.copyWith(
+      pinnedMessage: message,
+      clearPin: message == null,
+    );
+
+    _rebuild();
+
+    try {
+      final res = await _api.pin(id, message?.remoteId);
+
+      if (!res.success) {
+        _conversation = before;
+        _rebuild();
+      }
+
+      return res.success;
+    } catch (_) {
+      _conversation = before;
+      _rebuild();
+
+      return false;
+    }
+  }
+
+  /// Send a copy of a message into other conversations.
+  ///
+  /// Returns how many landed. Nothing changes in *this* thread, so there is
+  /// no local state to update — the forwarded copies arrive in their own
+  /// conversations over the socket.
+  Future<int> forward(ChatMessage message, List<String> conversationIds) async {
+    final remoteId = message.remoteId;
+
+    if (remoteId == null || conversationIds.isEmpty) return 0;
+
+    try {
+      final res = await _api.forward(remoteId, conversationIds);
+
+      if (!res.success) return 0;
+
+      return res.dataMap['count'] as int? ?? conversationIds.length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Delete a message for me alone.
+  ///
+  /// The row leaves this device's list and never comes back, because the
+  /// server filters it out of every future page. The other person keeps
+  /// their copy and is told nothing.
+  Future<bool> hideMessage(ChatMessage message) async {
+    final remoteId = message.remoteId;
+
+    // Never sent, so there is nothing on the server to hide — dropping the
+    // bubble is the whole job.
+    if (remoteId == null) {
+      _pending.removeWhere((m) => m.id == message.id);
+
+      if (_replyingTo?.id == message.id) _replyingTo = null;
+
+      _rebuild();
+
+      return true;
+    }
+
+    // Removed first. Unlike delete-for-everyone there is nothing for the
+    // other side to disagree with, and a bubble that lingers for a round
+    // trip after you chose to delete it reads as a failure.
+    final index = _sent.indexWhere((m) => m.id == message.id);
+    final removed = index >= 0 ? _sent.removeAt(index) : null;
+
+    if (_replyingTo?.id == message.id) _replyingTo = null;
+
+    _rebuild();
+
+    try {
+      final res = await _api.hideMessage(remoteId);
+
+      if (!res.success && removed != null) {
+        _upsert(removed);
+        _rebuild();
+      }
+
+      return res.success;
+    } catch (_) {
+      if (removed != null) {
+        _upsert(removed);
+        _rebuild();
+      }
+
+      return false;
+    }
+  }
+
+  /// Delete a message for everyone.
+  ///
+  /// Soft on the server, so the other person's bubble becomes a tombstone
+  /// rather than a line vanishing out of the middle of their conversation.
+  Future<bool> deleteMessage(ChatMessage message) async {
+    final remoteId = message.remoteId;
+
+    // Nothing was ever sent, so there is nothing to delete — just drop the
+    // failed bubble off the end of the list.
+    if (remoteId == null) {
+      _pending.removeWhere((m) => m.id == message.id);
+      _rebuild();
+
+      return true;
+    }
+
+    try {
+      final res = await _api.deleteMessage(remoteId);
+
+      if (res.success) {
+        _upsert(message.copyWith(deleted: true));
+
+        if (_replyingTo?.id == message.id) _replyingTo = null;
+
+        _rebuild();
+      }
+
+      return res.success;
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// Delete the thread — declining a request and leaving a conversation are
   /// the same action against the same endpoint.
@@ -663,6 +950,28 @@ class ConversationStore extends ChangeNotifier {
       return;
     }
 
+    if (event == 'message.reacted') {
+      _applyReactions(data);
+
+      return;
+    }
+
+    if (event == 'conversation.pinned') {
+      // A pin is shared, so both banners move together. Null clears it.
+      final pinned = data['pinned_message'];
+
+      _conversation = _conversation?.copyWith(
+        pinnedMessage: pinned is Map<String, dynamic>
+            ? ChatMessage.fromJson(pinned, _meId)
+            : null,
+        clearPin: pinned == null,
+      );
+
+      _rebuild();
+
+      return;
+    }
+
     if (event != 'message.sent') return;
 
     final message = ChatMessage.fromJson(data, _meId)
@@ -684,6 +993,28 @@ class ConversationStore extends ChangeNotifier {
 
     // The screen is open, so anything arriving on it has been seen.
     if (!message.isMine) unawaited(_markRead());
+
+    _rebuild();
+  }
+
+  /// Somebody reacted. The payload carries the whole set for that message,
+  /// not a delta — two people reacting at once would otherwise leave the two
+  /// screens disagreeing with no way to notice.
+  void _applyReactions(Map<String, dynamic> data) {
+    final messageId = data['message_id'] as String?;
+
+    if (messageId == null) return;
+
+    final index = _sent.indexWhere((m) => m.remoteId == messageId);
+
+    if (index < 0) return;
+
+    _sent[index] = _sent[index].copyWith(
+      reactions: (data['reactions'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(Reaction.fromJson)
+          .toList(),
+    );
 
     _rebuild();
   }

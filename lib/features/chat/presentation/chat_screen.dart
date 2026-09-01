@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:ui';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/theme/app_colors.dart';
@@ -14,7 +16,10 @@ import '../../people/presentation/widgets/person_avatar.dart';
 import '../data/chat_models.dart';
 import '../state/conversation_store.dart';
 import '../state/realtime_client.dart';
+import 'attachment_preview_screen.dart';
+import 'forward_sheet.dart';
 import 'widgets/attach_sheet.dart';
+import 'widgets/message_menu.dart';
 import 'widgets/message_bubble.dart';
 
 /// A one-to-one conversation.
@@ -75,6 +80,31 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   bool _canSend = false;
 
+  /// One key per run of messages, kept across rebuilds and keyed on the first
+  /// message in the run — a new key every frame would rebuild the row and
+  /// leave nothing for [Scrollable.ensureVisible] to aim at.
+  final Map<String, GlobalKey> _groupKeys = {};
+
+  /// Server id → the key of the row that message is drawn in, and that row's
+  /// position in the list. Rebuilt whenever the list is.
+  final Map<String, GlobalKey> _messageKeys = {};
+  final Map<String, int> _messageRows = {};
+  int _rowCount = 0;
+
+  /// The message just jumped to, tinted briefly.
+  String? _highlightedId;
+  Timer? _highlight;
+
+  /// Whether the thread is parked at the newest message. Drives the jump
+  /// button, which has no reason to exist while you are already there.
+  bool _atBottom = true;
+
+  /// How many messages have arrived from the other person while you were
+  /// reading further up. Derived from the sequence numbers rather than
+  /// counted as they land, so it cannot drift out of step.
+  int _unseen = 0;
+  int _seenSeq = 0;
+
   @override
   void initState() {
     super.initState();
@@ -102,14 +132,64 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (position.pixels >= position.maxScrollExtent - 320) {
         _store.loadOlder();
       }
+
+      // Offset zero is the newest message, the list being reversed. The
+      // threshold is a screenful-ish rather than exact: a button that
+      // flickers in and out over the last few pixels of a rubber-band bounce
+      // is worse than one that waits until you have actually left.
+      _setAtBottom(position.pixels < 220);
     });
 
+    // New arrivals while you are reading history are the whole reason the
+    // button carries a count.
+    _store.addListener(_syncUnseen);
+
     _store.open();
+  }
+
+  void _setAtBottom(bool atBottom) {
+    if (atBottom == _atBottom) return;
+
+    setState(() => _atBottom = atBottom);
+
+    _syncUnseen();
+  }
+
+  /// Recount what has arrived since the thread was last at the bottom.
+  void _syncUnseen() {
+    final messages = _store.messages;
+
+    // The highest sequence number, not the last message: an unsent bubble
+    // sits at the end of the list with a sequence of zero, and reading that
+    // as "the newest" would mark the whole thread unseen the moment a send
+    // failed.
+    final latest = messages.fold<int>(0, (max, m) => m.seq > max ? m.seq : max);
+
+    // Sitting at the bottom means everything is seen by definition.
+    if (_atBottom) {
+      if (_unseen != 0 || _seenSeq != latest) {
+        _seenSeq = latest;
+
+        if (_unseen != 0 && mounted) setState(() => _unseen = 0);
+      }
+
+      return;
+    }
+
+    // Your own messages never count: sending one scrolls you down anyway,
+    // and a badge telling you about your own message is noise.
+    final unseen = messages
+        .where((m) => !m.isMine && m.seq > _seenSeq)
+        .length;
+
+    if (unseen != _unseen && mounted) setState(() => _unseen = unseen);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _highlight?.cancel();
+    _store.removeListener(_syncUnseen);
     _controller.dispose();
     _focus.dispose();
     _scroll.dispose();
@@ -144,6 +224,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _scrollToLatest() {
+    // Marked before the animation rather than after it: the button should go
+    // the moment it is tapped, not a quarter of a second later.
+    _setAtBottom(true);
+
     // The list is reversed, so "latest" is offset zero.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
@@ -171,6 +255,249 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// 6–12 MB files, and nobody looking at a chat bubble can tell the
   /// difference between that and 1600px of JPEG — but the person on mobile
   /// data certainly can.
+  /// Long press on a message.
+  ///
+  /// Copy is offered only for text — copying "Photo" to the clipboard would
+  /// be a lie about what was copied. Delete only for your own messages,
+  /// because the endpoint refuses anybody else's and offering an action that
+  /// always fails is worse than not offering it.
+  Future<void> _onMessageLongPress(ChatMessage message, Offset at) async {
+    final result = await showMessageMenu(
+      context,
+      at: at,
+      canCopy: message.body.isNotEmpty && !message.deleted,
+      // A tombstone gets a menu of one: clear it from your own side.
+      deleted: message.deleted,
+      // Both are toggles, so the menu needs to know which way round to draw
+      // them — offering "Pin" on the message already pinned would leave the
+      // reader guessing what the tap does.
+      pinned: _isPinned(message),
+      starred: message.starred,
+      myReaction: _myReaction(message),
+    );
+
+    if (result == null || !mounted) return;
+
+    final emoji = result.emoji;
+
+    if (emoji != null) {
+      await _store.react(message, emoji);
+
+      return;
+    }
+
+    switch (result.action!) {
+      case MessageAction.reply:
+        _store.startReply(message);
+        _focus.requestFocus();
+
+      case MessageAction.copy:
+        await Clipboard.setData(ClipboardData(text: message.body));
+
+        if (mounted) AppToast.success(context, 'Copied.');
+
+      case MessageAction.forward:
+        await _forward(message);
+
+      case MessageAction.pin:
+        await _pin(message);
+
+      case MessageAction.unpin:
+        await _pin(null);
+
+      case MessageAction.star:
+      case MessageAction.unstar:
+        await _store.toggleStar(message);
+
+      case MessageAction.delete:
+        await _confirmDelete(message);
+    }
+  }
+
+  /// Whether this is the message pinned in the thread.
+  ///
+  /// Compared on the server id, not the client one: the pinned copy comes
+  /// back from a different endpoint and carries no client id, so the two
+  /// objects are never the same instance.
+  bool _isPinned(ChatMessage message) {
+    final pinned = _store.conversation?.pinnedMessage?.remoteId;
+
+    return pinned != null && pinned == message.remoteId;
+  }
+
+  /// Pin a message, or pass null to clear it.
+  Future<void> _pin(ChatMessage? message) async {
+    // A message that never reached the server has no id to pin.
+    if (message != null && message.remoteId == null) {
+      AppToast.error(context, 'Wait for it to send first.');
+
+      return;
+    }
+
+    final ok = await _store.pin(message);
+
+    if (!mounted) return;
+
+    if (ok) {
+      AppToast.success(context, message == null ? 'Unpinned.' : 'Pinned.');
+    } else {
+      AppToast.error(context, 'Could not change the pin.');
+    }
+  }
+
+  /// Send a copy of a message into other conversations.
+  Future<void> _forward(ChatMessage message) async {
+    if (message.remoteId == null) {
+      AppToast.error(context, 'Wait for it to send first.');
+
+      return;
+    }
+
+    final targets = await showForwardSheet(context);
+
+    if (targets == null || targets.isEmpty || !mounted) return;
+
+    final sent = await _store.forward(message, targets);
+
+    if (!mounted) return;
+
+    if (sent > 0) {
+      AppToast.success(
+        context,
+        sent == 1 ? 'Forwarded.' : 'Forwarded to $sent chats.',
+      );
+    } else {
+      AppToast.error(context, 'Could not forward that.');
+    }
+  }
+
+  /// Tapping the quoted strip inside a reply.
+  void _onQuoteTap(QuotedMessage quote) => _jumpToMessage(quote.id);
+
+  /// Jump to the message a reply is answering.
+  ///
+  /// Three problems, in order. The message may be older than anything loaded,
+  /// so history is walked back until it turns up. It may be loaded but not
+  /// built — a lazy list only builds what is near the viewport, and a widget
+  /// that does not exist has no position to scroll to. Only once it is built
+  /// can the framework place it exactly.
+  Future<void> _jumpToMessage(String messageId) async {
+    if (messageId.isEmpty) return;
+
+    var key = _messageKeys[messageId];
+
+    // Bounded. A reply to something a thousand messages back is not worth
+    // pulling the whole thread down the wire for.
+    for (var page = 0; key == null && page < 5 && _store.hasMore; page++) {
+      await _store.loadOlder();
+
+      if (!mounted) return;
+
+      await WidgetsBinding.instance.endOfFrame;
+
+      if (!mounted) return;
+
+      key = _messageKeys[messageId];
+    }
+
+    if (key == null) {
+      if (mounted) AppToast.error(context, 'That message is too far back.');
+
+      return;
+    }
+
+    /*
+     | Walk toward it until it exists.
+     |
+     | The offset is estimated from the row's position in the list, which is
+     | only a guess while rows have different heights — but each jump makes
+     | the list measure more of itself, so the next guess is better than the
+     | last. Two or three passes is normally enough for the row to be built,
+     | and then ensureVisible does the precise part.
+     */
+    for (var attempt = 0; attempt < 6 && key.currentContext == null; attempt++) {
+      final row = _messageRows[messageId];
+
+      if (row == null || !_scroll.hasClients || _rowCount < 2) return;
+
+      final position = _scroll.position;
+
+      // Reversed list: row zero is the oldest and sits at the far end of the
+      // scroll extent, so the fraction counts backwards.
+      final fraction = (_rowCount - 1 - row) / (_rowCount - 1);
+
+      _scroll.jumpTo(
+        (fraction * position.maxScrollExtent).clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        ),
+      );
+
+      await WidgetsBinding.instance.endOfFrame;
+
+      if (!mounted) return;
+    }
+
+    final target = key.currentContext;
+
+    if (target == null || !mounted) return;
+
+    await Scrollable.ensureVisible(
+      target,
+      // A third of the way down rather than at the very top: a reply usually
+      // needs the line or two above it to make sense.
+      alignment: 0.35,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+
+    if (!mounted) return;
+
+    setState(() => _highlightedId = messageId);
+
+    _highlight?.cancel();
+    _highlight = Timer(const Duration(milliseconds: 1700), () {
+      if (mounted) setState(() => _highlightedId = null);
+    });
+  }
+
+  /// The emoji this person already has on a message, if any.
+  String? _myReaction(ChatMessage message) {
+    for (final reaction in message.reactions) {
+      if (reaction.mine(_store.meId)) return reaction.emoji;
+    }
+
+    return null;
+  }
+
+  /// Ask which kind of delete, then do it.
+  ///
+  /// Two genuinely different acts behind one word, so the dialog names them
+  /// rather than asking "are you sure": one edits the conversation both
+  /// people are in, the other only takes it off this screen.
+  Future<void> _confirmDelete(ChatMessage message) async {
+    // Deleting for everyone is only ever offered on your own message — the
+    // endpoint refuses anybody else's, and an option that always fails is
+    // worse than one that is not there. A tombstone has nothing left to
+    // remove for everyone either.
+    final canDeleteForEveryone =
+        message.isMine && !message.deleted && message.remoteId != null;
+
+    final choice = await showDialog<_DeleteChoice>(
+      context: context,
+      builder: (context) => _DeleteDialog(forEveryone: canDeleteForEveryone),
+    );
+
+    if (choice == null || !mounted) return;
+
+    final ok = switch (choice) {
+      _DeleteChoice.everyone => await _store.deleteMessage(message),
+      _DeleteChoice.me => await _store.hideMessage(message),
+    };
+
+    if (!ok && mounted) AppToast.error(context, 'Could not delete that.');
+  }
+
   /// The + button: ask what kind of thing, then go and get it.
   Future<void> _attach() async {
     final choice = await showAttachSheet(context);
@@ -211,12 +538,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // from here until that platform is actually supported.
       if (path == null) return;
 
-      final caption = _controller.text.trim();
-
-      _controller.clear();
-      _scrollToLatest();
-
-      await _store.sendFile(path, caption: caption);
+      await _confirmAndSend(path, MessageType.file);
     } catch (_) {
       if (mounted) AppToast.error(context, 'Could not open that file.');
     }
@@ -233,14 +555,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
       if (picked == null || !mounted) return;
 
-      final caption = _controller.text.trim();
-
-      _controller.clear();
-      _scrollToLatest();
-
-      await _store.sendImage(picked.path, caption: caption);
+      await _confirmAndSend(picked.path, MessageType.image);
     } catch (_) {
       if (mounted) AppToast.error(context, 'Could not open that photo.');
+    }
+  }
+
+  /// Show the attachment, take a caption, and only then send.
+  ///
+  /// Picking a file is not the same as deciding to send it — a wrong tap, a
+  /// second thought, something you wanted to say first. Sending on selection
+  /// turns every one of those into a message the other person has already
+  /// read.
+  ///
+  /// Whatever is already in the composer travels across as the starting
+  /// caption, and is only cleared once the send is confirmed. Discarding
+  /// leaves the draft exactly where it was.
+  Future<void> _confirmAndSend(String path, String type) async {
+    final draft = await openAttachmentPreview(
+      context,
+      filePath: path,
+      type: type,
+      initialCaption: _controller.text.trim(),
+    );
+
+    if (draft == null || !mounted) return;
+
+    _controller.clear();
+    _scrollToLatest();
+
+    if (type == MessageType.image) {
+      await _store.sendImage(path, caption: draft.caption);
+    } else {
+      await _store.sendFile(path, caption: draft.caption);
     }
   }
 
@@ -419,13 +766,47 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     onTapPerson: _openProfile,
                   ),
                   const _ConnectionStrip(),
+
+                  // Directly under the header, above everything else in the
+                  // thread — a pin that scrolls away with the messages is
+                  // not a pin.
+                  if (_store.conversation?.pinnedMessage != null)
+                    _PinnedBanner(
+                      message: _store.conversation!.pinnedMessage!,
+                      onUnpin: () => _pin(null),
+                      // The banner is a shortcut back to the message, not
+                      // just a copy of it.
+                      onTap: () => _jumpToMessage(
+                        _store.conversation!.pinnedMessage!.remoteId ?? '',
+                      ),
+                    ),
                   if (_store.isRequest && !_store.blocked)
                     _RequestBanner(
                       name: person?.name ?? widget.name,
                       onAccept: _accept,
                       onDecline: _decline,
                     ),
-                  Expanded(child: _body()),
+                  Expanded(
+                    child: Stack(
+                      // The list takes the whole area; only the button floats.
+                      fit: StackFit.expand,
+                      children: [
+                        _body(),
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 10,
+                          child: Center(
+                            child: _JumpToLatest(
+                              visible: !_atBottom && !_store.loading,
+                              unseen: _unseen,
+                              onTap: _scrollToLatest,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   if (_store.awaitingAcceptance &&
                       !_store.isRequest &&
                       !_store.blocked)
@@ -436,7 +817,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   // out than a line of text that says so up front.
                   if (_store.blocked)
                     const _BlockedNotice()
-                  else
+                  else ...[
+                    if (_store.replyingTo != null)
+                      _ReplyStrip(
+                        message: _store.replyingTo!,
+                        onCancel: _store.cancelReply,
+                      ),
                     _Composer(
                       controller: _controller,
                       focus: _focus,
@@ -444,6 +830,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       onSend: _send,
                       onAttach: _attach,
                     ),
+                  ],
                 ],
               );
             },
@@ -499,15 +886,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final rows = <Widget>[];
     DateTime? lastDay;
 
+    // Rebuilt from scratch: a message that has left the window must not keep
+    // a row index pointing at whatever now sits there.
+    _messageKeys.clear();
+    _messageRows.clear();
+
     for (final group in groups) {
       final day = group.messages.first.sentAt.toLocal();
 
-      if (lastDay == null ||
+      final newDay = lastDay == null ||
           day.year != lastDay.year ||
           day.month != lastDay.month ||
-          day.day != lastDay.day) {
+          day.day != lastDay.day;
+
+      if (newDay) {
         rows.add(ChatDateChip(label: chatDateLabel(day)));
         lastDay = day;
+      }
+
+      // Keyed on the first message of the run, which is stable — the run can
+      // grow as more arrive without the key changing underneath it.
+      final key =
+          _groupKeys.putIfAbsent(group.messages.first.id, () => GlobalKey());
+
+      // Every message in the run points at the row it is drawn in: the key
+      // for the precise scroll, the index for the estimate that gets the row
+      // built in the first place.
+      for (final message in group.messages) {
+        final id = message.remoteId;
+
+        if (id == null) continue;
+
+        _messageKeys[id] = key;
+        _messageRows[id] = rows.length;
       }
 
       final failed = group.last.failed;
@@ -519,12 +930,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             // reach the server this returns that message rather than posting
             // a second copy.
             ? GestureDetector(
+                key: key,
                 onTap: () => _store.retry(group.last),
                 behavior: HitTestBehavior.opaque,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    MessageGroupView(group: group),
+                    MessageGroupView(
+                      group: group,
+                      meId: _store.meId,
+                      onLongPress: _onMessageLongPress,
+                      onReactionTap: _store.react,
+                      onQuoteTap: _onQuoteTap,
+                      highlightedId: _highlightedId,
+                    ),
                     const Padding(
                       padding: EdgeInsets.only(right: 6, bottom: 10),
                       child: Text(
@@ -538,7 +957,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   ],
                 ),
               )
-            : MessageGroupView(group: group),
+            : MessageGroupView(
+                key: key,
+                group: group,
+                meId: _store.meId,
+                onLongPress: _onMessageLongPress,
+                onReactionTap: _store.react,
+                onQuoteTap: _onQuoteTap,
+                highlightedId: _highlightedId,
+              ),
       );
     }
 
@@ -562,6 +989,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     }
 
+    // The loading row at the top shifts everything below it, so the recorded
+    // indices are only right once the whole list is assembled.
+    if (_store.loadingOlder) {
+      for (final id in _messageRows.keys.toList()) {
+        _messageRows[id] = _messageRows[id]! + 1;
+      }
+    }
+
+    _rowCount = rows.length;
+
     return ListView.builder(
       controller: _scroll,
       // Reversed so new messages appear at the bottom and the view stays
@@ -574,6 +1011,325 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       ),
       itemCount: rows.length,
       itemBuilder: (context, i) => rows[rows.length - 1 - i],
+    );
+  }
+}
+
+enum _DeleteChoice { everyone, me }
+
+/// Which kind of delete.
+///
+/// Stacked full-width rows rather than the usual pair of text buttons in the
+/// corner: three choices where two of them start with the same word need
+/// room to be read, and "Delete for everyone" squeezed beside "Delete for me"
+/// is how people tap the wrong one.
+class _DeleteDialog extends StatelessWidget {
+  const _DeleteDialog({required this.forEveryone});
+
+  /// Whether deleting for everyone is on the table at all.
+  final bool forEveryone;
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: AppColors.canvasRaised,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: const BorderSide(color: AppColors.glassBorder),
+      ),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 34),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(22, 22, 22, 6),
+            child: Text(
+              'Delete message?',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(22, 0, 22, 16),
+            child: Text(
+              forEveryone
+                  ? 'Delete it for both of you, or just take it off your own '
+                      'screen.'
+                  : 'It will be removed from your screen only. They keep '
+                      'their copy.',
+              style: const TextStyle(
+                fontSize: 13,
+                height: 1.45,
+                color: AppColors.textMuted,
+              ),
+            ),
+          ),
+          if (forEveryone)
+            _DeleteOption(
+              label: 'Delete for everyone',
+              // Said plainly, because it cannot be undone and the other
+              // person will see that something was there.
+              note: 'They will see that a message was deleted',
+              danger: true,
+              onTap: () =>
+                  Navigator.of(context).pop(_DeleteChoice.everyone),
+            ),
+          _DeleteOption(
+            label: 'Delete for me',
+            note: 'Removed from this chat on your devices',
+            onTap: () => Navigator.of(context).pop(_DeleteChoice.me),
+          ),
+          _DeleteOption(
+            label: 'Cancel',
+            muted: true,
+            onTap: () => Navigator.of(context).pop(),
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeleteOption extends StatelessWidget {
+  const _DeleteOption({
+    required this.label,
+    required this.onTap,
+    this.note,
+    this.danger = false,
+    this.muted = false,
+  });
+
+  final String label;
+  final String? note;
+  final bool danger;
+  final bool muted;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = danger
+        ? AppColors.alertRed
+        : muted
+            ? AppColors.textMuted
+            : AppColors.textPrimary;
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(22, note == null ? 13 : 11, 22, 11),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 14.5,
+                fontWeight: FontWeight.w600,
+                color: tint,
+              ),
+            ),
+            if (note != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                note!,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: AppColors.textMuted.withValues(alpha: 0.85),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Back to the newest message.
+///
+/// Only while you are away from it. A control that is always on screen is one
+/// more thing sitting over the conversation, and for most of a session it
+/// would do nothing.
+class _JumpToLatest extends StatelessWidget {
+  const _JumpToLatest({
+    required this.visible,
+    required this.unseen,
+    required this.onTap,
+  });
+
+  final bool visible;
+
+  /// Messages from the other person since you scrolled away. Zero draws a
+  /// plain circle — a "0" badge is a badge that should not be there.
+  final int unseen;
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      // Hidden means untappable. An invisible button that still takes taps
+      // steals them from the message underneath it.
+      ignoring: !visible,
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOutCubic,
+        offset: visible ? Offset.zero : const Offset(0, 0.55),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 180),
+          opacity: visible ? 1 : 0,
+          child: GestureDetector(
+            onTap: onTap,
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              height: 40,
+              padding: EdgeInsets.symmetric(horizontal: unseen > 0 ? 14 : 10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(20),
+                color: AppColors.canvasRaised,
+                border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.45),
+                    blurRadius: 16,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (unseen > 0) ...[
+                    Container(
+                      constraints: const BoxConstraints(minWidth: 20),
+                      height: 20,
+                      alignment: Alignment.center,
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        gradient: AppColors.safeGradient,
+                      ),
+                      child: Text(
+                        // Past a certain point the exact number stops being
+                        // information and starts being a wall of digits.
+                        unseen > 99 ? '99+' : '$unseen',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF04121F),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 7),
+                  ],
+                  const Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    size: 22,
+                    color: AppColors.aqua,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The pinned message, held above the thread.
+///
+/// Shared by both people, unlike a star: either can set or clear it, and both
+/// banners move together over the socket. That is the whole reason it exists
+/// — it is for the address, the flight number, the date the two of you keep
+/// scrolling back for, and a private bookmark would not serve that.
+class _PinnedBanner extends StatelessWidget {
+  const _PinnedBanner({
+    required this.message,
+    required this.onUnpin,
+    required this.onTap,
+  });
+
+  final ChatMessage message;
+  final VoidCallback onUnpin;
+  final VoidCallback onTap;
+
+  String get _preview {
+    if (message.deleted) return 'Message deleted';
+
+    if (message.body.isNotEmpty) return message.body;
+
+    return switch (message.type) {
+      MessageType.image => 'Photo',
+      MessageType.file => message.attachment?.name ?? 'File',
+      MessageType.audio => 'Voice message',
+      _ => 'Message',
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
+        decoration: BoxDecoration(
+          color: AppColors.canvasRaised.withValues(alpha: 0.92),
+          border: Border(
+            bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.push_pin_rounded, size: 15, color: AppColors.aqua),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Pinned message',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
+                      color: AppColors.aqua,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _preview,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Unpinning from the banner rather than only from the message: the
+            // pinned message may be a thousand rows back, and needing to find
+            // it again to release it would make the pin feel permanent.
+            IconButton(
+              onPressed: onUnpin,
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.close_rounded,
+                  size: 17, color: AppColors.textMuted),
+              tooltip: 'Unpin',
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -821,6 +1577,35 @@ class _MenuRow extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// The message being replied to, sitting above the composer.
+///
+/// Uses the same [QuotedStrip] the bubble does, so what you see while writing
+/// is what lands in the conversation.
+class _ReplyStrip extends StatelessWidget {
+  const _ReplyStrip({required this.message, required this.onCancel});
+
+  final ChatMessage message;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+      color: AppColors.canvas.withValues(alpha: 0.72),
+      child: QuotedStrip(
+        quote: QuotedMessage(
+          id: message.remoteId ?? '',
+          isMine: message.isMine,
+          body: message.body,
+          type: message.type,
+          deleted: message.deleted,
+        ),
+        onClose: onCancel,
       ),
     );
   }

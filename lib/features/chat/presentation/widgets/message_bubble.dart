@@ -12,9 +12,35 @@ import '../image_viewer.dart';
 /// The timestamp and the delivery ticks appear once, on the last bubble of the
 /// run. Repeating them under every line turns a conversation into a table.
 class MessageGroupView extends StatelessWidget {
-  const MessageGroupView({super.key, required this.group});
+  const MessageGroupView({
+    super.key,
+    required this.group,
+    required this.meId,
+    this.onLongPress,
+    this.onReactionTap,
+    this.onQuoteTap,
+    this.highlightedId,
+  });
 
   final MessageGroup group;
+
+  /// Needed to tell your own reaction from theirs.
+  final String meId;
+
+  /// Tapping a pill toggles that emoji.
+  final void Function(ChatMessage message, String emoji)? onReactionTap;
+
+  /// Tapping the quoted strip inside a reply jumps to what it answers.
+  final void Function(QuotedMessage quote)? onQuoteTap;
+
+  /// The message the thread has just jumped to, tinted for a moment so the
+  /// eye can find it. Landing on a wall of bubbles with no idea which one
+  /// was the destination defeats the point of jumping.
+  final String? highlightedId;
+
+  /// Long press on one bubble. Carries the global position so the menu can
+  /// be anchored to the message rather than to the screen.
+  final void Function(ChatMessage message, Offset at)? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -31,10 +57,38 @@ class MessageGroupView extends StatelessWidget {
               padding: EdgeInsets.only(
                 bottom: i == group.messages.length - 1 ? 0 : 3,
               ),
-              child: _Bubble(
-                message: group.messages[i],
-                first: i == 0,
-                last: i == group.messages.length - 1,
+              // The tint sits on a wrapper whose padding never changes, so
+              // highlighting a message fades a colour in and out rather than
+              // nudging the whole conversation sideways.
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 240),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  color: highlightedId != null &&
+                          group.messages[i].remoteId == highlightedId
+                      ? AppColors.aqua.withValues(alpha: 0.17)
+                      : Colors.transparent,
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                  children: [
+                    _Bubble(
+                      message: group.messages[i],
+                      first: i == 0,
+                      last: i == group.messages.length - 1,
+                      onLongPress: onLongPress,
+                      onQuoteTap: onQuoteTap,
+                    ),
+                    if (group.messages[i].reactions.isNotEmpty)
+                      ReactionPills(
+                        message: group.messages[i],
+                        meId: meId,
+                        onTap: onReactionTap,
+                      ),
+                  ],
+                ),
               ),
             ),
           const SizedBox(height: 5),
@@ -50,14 +104,35 @@ class _Bubble extends StatelessWidget {
     required this.message,
     required this.first,
     required this.last,
+    this.onLongPress,
+    this.onQuoteTap,
   });
 
   final ChatMessage message;
   final bool first;
   final bool last;
+  final void Function(ChatMessage message, Offset at)? onLongPress;
+  final void Function(QuotedMessage quote)? onQuoteTap;
 
   @override
   Widget build(BuildContext context) {
+    final handler = onLongPress;
+
+    // Deleted messages stay pressable: the menu narrows itself to Delete, so
+    // a tombstone can still be cleared from your own side.
+    if (handler == null) return _body(context);
+
+    return GestureDetector(
+      // onLongPressStart rather than onLongPress: the details carry the global
+      // position, which is what lets the menu open beside the bubble instead
+      // of somewhere generic.
+      onLongPressStart: (details) => handler(message, details.globalPosition),
+      behavior: HitTestBehavior.opaque,
+      child: _body(context),
+    );
+  }
+
+  Widget _body(BuildContext context) {
     final mine = message.isMine;
 
     // The corner nearest the sender stays tight through a run and only opens
@@ -105,15 +180,73 @@ class _Bubble extends StatelessWidget {
                 ? null
                 : Border.all(color: Colors.white.withValues(alpha: 0.09)),
           ),
-          child: Text(
-            message.body,
-            style: TextStyle(
-              fontSize: 14,
-              height: 1.38,
-              // Dark ink on the bright gradient; light on the glass. Reversing
-              // these is the fastest way to make a chat unreadable.
-              color: mine ? const Color(0xFF04121F) : AppColors.textPrimary,
-            ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (message.forwarded) ...[
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.shortcut_rounded,
+                      size: 13,
+                      color: (mine
+                              ? const Color(0xFF04121F)
+                              : AppColors.textMuted)
+                          .withValues(alpha: 0.7),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Forwarded',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontStyle: FontStyle.italic,
+                        color: (mine
+                                ? const Color(0xFF04121F)
+                                : AppColors.textMuted)
+                            .withValues(alpha: 0.7),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+              ],
+              if (message.replyTo != null) ...[
+                QuotedStrip(
+                  quote: message.replyTo!,
+                  onDark: mine,
+                  // Tapping the quote jumps to what it answers — the reply
+                  // is only half a sentence without the line above it.
+                  onTap: onQuoteTap == null
+                      ? null
+                      : () => onQuoteTap!(message.replyTo!),
+                ),
+                const SizedBox(height: 7),
+              ],
+              Text(
+                // Never the stored body once deleted. The server already
+                // withholds it, and this makes the client incapable of
+                // showing it even if a stale copy is lying around.
+                message.deleted ? 'This message was deleted' : message.body,
+                style: TextStyle(
+                  fontSize: 14,
+                  height: 1.38,
+                  fontStyle:
+                      message.deleted ? FontStyle.italic : FontStyle.normal,
+                  // Dark ink on the bright gradient; light on the glass.
+                  // Reversing these is the fastest way to make a chat
+                  // unreadable.
+                  color: message.deleted
+                      ? (mine
+                          ? const Color(0xFF04121F).withValues(alpha: 0.6)
+                          : AppColors.textMuted)
+                      : (mine
+                          ? const Color(0xFF04121F)
+                          : AppColors.textPrimary),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -392,6 +525,175 @@ class _ImagePlaceholder extends StatelessWidget {
   }
 }
 
+/// The emoji pills under a message.
+///
+/// Overlapping the bubble's bottom edge slightly, the way every chat app
+/// draws them: it ties the reaction to the message rather than letting it
+/// float as a separate row.
+class ReactionPills extends StatelessWidget {
+  const ReactionPills({
+    super.key,
+    required this.message,
+    required this.meId,
+    this.onTap,
+  });
+
+  final ChatMessage message;
+  final String meId;
+  final void Function(ChatMessage message, String emoji)? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Transform.translate(
+      offset: const Offset(0, -6),
+      child: Wrap(
+        spacing: 4,
+        children: [
+          for (final reaction in message.reactions)
+            GestureDetector(
+              onTap: onTap == null
+                  ? null
+                  : () => onTap!(message, reaction.emoji),
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(20),
+                  color: AppColors.canvasRaised,
+                  border: Border.all(
+                    // Yours is outlined, so you can see at a glance which
+                    // one you added without counting.
+                    color: reaction.mine(meId)
+                        ? AppColors.aqua
+                        : Colors.white.withValues(alpha: 0.14),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(reaction.emoji,
+                        style: const TextStyle(fontSize: 13)),
+                    if (reaction.count > 1) ...[
+                      const SizedBox(width: 3),
+                      Text(
+                        '${reaction.count}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textMuted,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The quoted message shown above a reply.
+///
+/// A coloured rail down the left rather than a box: it reads as "attached to
+/// what follows" instead of as a separate message, which is exactly the
+/// relationship. Used both inside a bubble and above the composer while a
+/// reply is being written, so the two always look like the same thing.
+class QuotedStrip extends StatelessWidget {
+  const QuotedStrip({
+    super.key,
+    required this.quote,
+    this.onDark = false,
+    this.onClose,
+    this.onTap,
+  });
+
+  final QuotedMessage quote;
+
+  /// True inside your own bubble, where the background is the bright
+  /// gradient and light-on-dark would disappear.
+  final bool onDark;
+
+  /// Shows a dismiss button. Only the composer passes this.
+  final VoidCallback? onClose;
+
+  /// Jump to the quoted message. Null in the composer, where the original is
+  /// the message you are already looking at.
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ink = onDark ? const Color(0xFF04121F) : AppColors.textPrimary;
+    final rail = onDark ? const Color(0xFF04121F) : AppColors.aqua;
+
+    final strip = Container(
+      padding: const EdgeInsets.fromLTRB(9, 6, 9, 7),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        color: (onDark ? Colors.black : Colors.white).withValues(alpha: 0.09),
+        border: Border(left: BorderSide(color: rail, width: 3)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  quote.isMine ? 'You' : 'Them',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: rail.withValues(alpha: onDark ? 0.85 : 1),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  quote.preview,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.3,
+                    fontStyle:
+                        quote.deleted ? FontStyle.italic : FontStyle.normal,
+                    color: ink.withValues(alpha: 0.75),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (onClose != null)
+            GestureDetector(
+              onTap: onClose,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8, top: 2),
+                child: Icon(Icons.close_rounded,
+                    size: 17, color: ink.withValues(alpha: 0.6)),
+              ),
+            ),
+        ],
+      ),
+    );
+
+    if (onTap == null) return strip;
+
+    // The bubble around this already has a long-press handler. A tap and a
+    // long press do not collide, so the quote can own the tap without taking
+    // the menu away from the message it sits in.
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: strip,
+    );
+  }
+}
+
 /// Time, and delivery state on your own messages.
 class _Meta extends StatelessWidget {
   const _Meta({required this.message, required this.mine});
@@ -406,6 +708,11 @@ class _Meta extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (message.starred) ...[
+            Icon(Icons.star_rounded,
+                size: 11, color: AppColors.warmGold.withValues(alpha: 0.9)),
+            const SizedBox(width: 4),
+          ],
           Text(
             message.timeLabel,
             style: TextStyle(

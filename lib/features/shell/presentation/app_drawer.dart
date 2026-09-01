@@ -4,6 +4,7 @@ import '../../../core/session/session.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_toast.dart';
 import '../../auth/presentation/welcome_screen.dart';
+import '../../chat/presentation/starred_messages_screen.dart';
 import '../../profile/presentation/edit_profile_screen.dart';
 import '../../people/presentation/blocked_accounts_screen.dart';
 import '../../posts/presentation/my_posts_screen.dart';
@@ -41,6 +42,12 @@ class AppDrawer extends StatelessWidget {
                       Icons.grid_on_rounded,
                       'My posts',
                       () => _push(context, const MyPostsScreen()),
+                    ),
+                    _item(
+                      context,
+                      Icons.star_outline_rounded,
+                      'Starred messages',
+                      () => _push(context, const StarredMessagesScreen()),
                     ),
                     _item(
                       context,

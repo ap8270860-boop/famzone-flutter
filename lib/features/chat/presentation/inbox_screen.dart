@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/widgets/app_toast.dart';
 import '../../../core/widgets/aurora_background.dart';
 import '../../people/presentation/widgets/person_avatar.dart';
 import '../data/chat_models.dart';
 import '../state/chat_store.dart';
+import 'archived_chats_screen.dart';
 import 'chat_screen.dart';
+import 'widgets/thread_menu.dart';
 
 /// Every conversation, and the requests waiting on a decision.
 ///
@@ -71,6 +74,132 @@ class _InboxScreenState extends State<InboxScreen> {
     if (mounted) _store.refresh();
   }
 
+  /// The Archived entry appears only when there is something in there, and
+  /// never over the Requests tab — archiving belongs to accepted chats.
+  bool get _showArchived => !_requestsTab && _store.archivedCount > 0;
+
+  Future<void> _openArchived() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const ArchivedChatsScreen()),
+    );
+
+    // Something may have come back out while we were in there.
+    if (mounted) _store.refresh();
+  }
+
+  /// Long press on a row.
+  Future<void> _openThreadMenu(Conversation thread) async {
+    final action = await showThreadMenu(context, thread);
+
+    if (action == null || !mounted) return;
+
+    switch (action) {
+      case ThreadAction.archive:
+      case ThreadAction.unarchive:
+        await _store.archive(thread);
+
+      case ThreadAction.pin:
+      case ThreadAction.unpin:
+        await _store.pinChat(thread);
+
+      case ThreadAction.mute:
+      case ThreadAction.unmute:
+        await _store.mute(thread);
+
+      case ThreadAction.markUnread:
+        await _store.markUnread(thread);
+
+      case ThreadAction.clear:
+        await _confirmClear(thread);
+
+      case ThreadAction.delete:
+        await _confirmDelete(thread);
+    }
+  }
+
+  Future<void> _confirmClear(Conversation thread) async {
+    final confirmed = await _confirm(
+      title: 'Clear this chat?',
+      body: 'Every message will be removed from your side. '
+          '${thread.other?.name ?? 'They'} will still have the whole '
+          'conversation, and the chat stays in your list.',
+      action: 'Clear',
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final ok = await _store.clearChat(thread);
+
+    if (!mounted) return;
+
+    if (ok) {
+      AppToast.success(context, 'Chat cleared.');
+    } else {
+      AppToast.error(context, 'Could not clear that chat.');
+    }
+  }
+
+  Future<void> _confirmDelete(Conversation thread) async {
+    final confirmed = await _confirm(
+      title: 'Delete this chat?',
+      // Honest about what leaving actually does: the thread is not destroyed,
+      // and a later message from them reopens it with its history intact.
+      body: 'It leaves your list. If '
+          '${thread.other?.name ?? 'they'} messages you again, the '
+          'conversation comes back.',
+      action: 'Delete',
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final ok = await _store.leave(thread);
+
+    if (!mounted) return;
+
+    if (!ok) AppToast.error(context, 'Could not delete that chat.');
+  }
+
+  Future<bool?> _confirm({
+    required String title,
+    required String body,
+    required String action,
+  }) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.canvasRaised,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: AppColors.glassBorder),
+        ),
+        title: Text(
+          title,
+          style: const TextStyle(fontSize: 16, color: AppColors.textPrimary),
+        ),
+        content: Text(
+          body,
+          style: const TextStyle(
+            fontSize: 13,
+            height: 1.45,
+            color: AppColors.textMuted,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppColors.textMuted)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(action,
+                style: const TextStyle(color: AppColors.alertRed)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -120,11 +249,30 @@ class _InboxScreenState extends State<InboxScreen> {
                                     ),
                                     physics:
                                         const AlwaysScrollableScrollPhysics(),
-                                    itemCount: threads.length,
-                                    itemBuilder: (context, i) => _ThreadRow(
-                                      thread: threads[i],
-                                      onTap: () => _open(threads[i]),
-                                    ),
+                                    // The Archived entry rides at the top of
+                                    // the chats list as row zero, so it
+                                    // scrolls away instead of holding a
+                                    // permanent strip of the screen for
+                                    // something opened once a month.
+                                    itemCount: threads.length + (_showArchived ? 1 : 0),
+                                    itemBuilder: (context, i) {
+                                      if (_showArchived && i == 0) {
+                                        return _ArchivedEntry(
+                                          count: _store.archivedCount,
+                                          onTap: _openArchived,
+                                        );
+                                      }
+
+                                      final thread =
+                                          threads[_showArchived ? i - 1 : i];
+
+                                      return _ThreadRow(
+                                        thread: thread,
+                                        onTap: () => _open(thread),
+                                        onLongPress: () =>
+                                            _openThreadMenu(thread),
+                                      );
+                                    },
                                   ),
                           ),
                   ),
@@ -313,11 +461,76 @@ class _Tab extends StatelessWidget {
   }
 }
 
+/// The way in to the Archived list.
+class _ArchivedEntry extends StatelessWidget {
+  const _ArchivedEntry({required this.count, required this.onTap});
+
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+        child: Row(
+          children: [
+            // No avatar: this is not a person, and giving it a circle the
+            // size of one would make it read as a chat you could open.
+            SizedBox(
+              width: 50,
+              child: Icon(
+                Icons.archive_outlined,
+                size: 21,
+                color: AppColors.textMuted.withValues(alpha: 0.9),
+              ),
+            ),
+            const SizedBox(width: 13),
+            const Expanded(
+              child: Text(
+                'Archived',
+                style: TextStyle(
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+            ),
+            Text(
+              // Plain and grey, not a badge. How many chats are in there is
+              // information, not something waiting on you.
+              '$count',
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: AppColors.textMuted.withValues(alpha: 0.9),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Icon(
+              Icons.chevron_right_rounded,
+              size: 18,
+              color: AppColors.textMuted.withValues(alpha: 0.6),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ThreadRow extends StatelessWidget {
-  const _ThreadRow({required this.thread, required this.onTap});
+  const _ThreadRow({
+    required this.thread,
+    required this.onTap,
+    this.onLongPress,
+  });
 
   final Conversation thread;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -326,6 +539,7 @@ class _ThreadRow extends StatelessWidget {
 
     return GestureDetector(
       onTap: onTap,
+      onLongPress: onLongPress,
       behavior: HitTestBehavior.opaque,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
@@ -407,30 +621,78 @@ class _ThreadRow extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 6),
-                if (unread)
-                  Container(
-                    constraints: const BoxConstraints(minWidth: 20),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(20),
-                      gradient: AppColors.safeGradient,
-                    ),
-                    child: Text(
-                      thread.unreadCount > 99 ? '99+' : '${thread.unreadCount}',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF04121F),
+                // Muted and pinned share the row under the timestamp, where
+                // the unread badge goes. A muted chat with something waiting
+                // shows both: silenced is not the same as ignored.
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (thread.muted) ...[
+                      Icon(
+                        Icons.notifications_off_rounded,
+                        size: 13,
+                        color: AppColors.textMuted.withValues(alpha: 0.75),
                       ),
-                    ),
-                  )
-                else
-                  const SizedBox(height: 18),
+                      const SizedBox(width: 5),
+                    ],
+                    if (thread.pinned) ...[
+                      Icon(
+                        Icons.push_pin_rounded,
+                        size: 13,
+                        color: AppColors.textMuted.withValues(alpha: 0.75),
+                      ),
+                      const SizedBox(width: 5),
+                    ],
+                    if (unread)
+                      _UnreadBadge(thread: thread)
+                    else if (!thread.muted && !thread.pinned)
+                      const SizedBox(height: 18),
+                  ],
+                ),
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The count, or a plain dot when a chat was marked unread by hand.
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({required this.thread});
+
+  final Conversation thread;
+
+  @override
+  Widget build(BuildContext context) {
+    // Marked unread on purpose has no number to show — inventing "1" would
+    // claim a message arrived that did not.
+    if (thread.unreadCount == 0) {
+      return Container(
+        width: 11,
+        height: 11,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: AppColors.safeGradient,
+        ),
+      );
+    }
+
+    return Container(
+      constraints: const BoxConstraints(minWidth: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        gradient: AppColors.safeGradient,
+      ),
+      child: Text(
+        thread.unreadCount > 99 ? '99+' : '${thread.unreadCount}',
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w800,
+          color: Color(0xFF04121F),
         ),
       ),
     );
