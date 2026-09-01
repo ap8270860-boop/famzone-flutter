@@ -541,7 +541,18 @@ class ConversationStore extends ChangeNotifier {
     // send did land last time the server returns that message rather than a
     // duplicate — only the bytes are re-sent.
     if (retry.hasMedia && path != null) {
-      await _deliverMedia(retry, id, path, retry.type);
+      await _deliverMedia(
+        retry,
+        id,
+        path,
+        retry.type,
+        // A voice note keeps its duration and waveform on the local bubble,
+        // so a retry re-sends them. Without this the second attempt uploads
+        // a note with no waveform and no length — and a retry is exactly the
+        // moment nobody is watching closely enough to notice.
+        durationMs: retry.attachment?.durationMs,
+        waveform: retry.attachment?.waveform,
+      );
 
       return;
     }
