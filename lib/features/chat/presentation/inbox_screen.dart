@@ -8,6 +8,9 @@ import '../data/chat_models.dart';
 import '../state/chat_store.dart';
 import 'archived_chats_screen.dart';
 import 'chat_screen.dart';
+import 'new_group_screen.dart';
+import 'starred_messages_screen.dart';
+import 'widgets/inbox_menu.dart';
 import 'widgets/thread_menu.dart';
 
 /// Every conversation, and the requests waiting on a decision.
@@ -52,18 +55,20 @@ class _InboxScreenState extends State<InboxScreen> {
   Future<void> _open(Conversation thread) async {
     final person = thread.other;
 
-    if (person == null) return;
+    // A group has no person behind it; the chat screen reads the
+    // conversation itself for its header.
+    if (person == null && !thread.isGroup) return;
 
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => ChatScreen(
           conversationId: thread.id,
-          userId: person.id,
-          name: person.name,
-          username: person.username,
-          avatarUrl: person.avatarUrl,
-          initials: person.initials,
-          presence: person.presenceLabel,
+          userId: person?.id ?? '',
+          name: thread.displayName,
+          username: person?.username,
+          avatarUrl: thread.displayAvatarUrl,
+          initials: thread.displayInitials,
+          presence: person?.presenceLabel,
         ),
       ),
     );
@@ -72,6 +77,33 @@ class _InboxScreenState extends State<InboxScreen> {
     // moved on. Cheaper to refresh once here than to keep the inbox in sync
     // with a screen that is no longer on top of it.
     if (mounted) _store.refresh();
+  }
+
+  /// The three dots, top right.
+  Future<void> _openInboxMenu() async {
+    final choice = await showInboxMenu(context);
+
+    if (choice == null || !mounted) return;
+
+    switch (choice) {
+      case InboxMenuChoice.newGroup:
+      case InboxMenuChoice.familyGroup:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => NewGroupScreen(
+              familyOnly: choice == InboxMenuChoice.familyGroup,
+            ),
+          ),
+        );
+
+        // A group may have been made while we were in there.
+        if (mounted) _store.refresh();
+
+      case InboxMenuChoice.starred:
+        await Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => const StarredMessagesScreen()),
+        );
+    }
   }
 
   /// The Archived entry appears only when there is something in there, and
@@ -216,6 +248,7 @@ class _InboxScreenState extends State<InboxScreen> {
                   _TopBar(
                     unread: _store.unread,
                     embedded: widget.embedded,
+                    onMenu: _openInboxMenu,
                   ),
                   _Tabs(
                     requestsTab: _requestsTab,
@@ -335,9 +368,14 @@ class _InboxScreenState extends State<InboxScreen> {
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar({required this.unread, this.embedded = false});
+  const _TopBar({
+    required this.unread,
+    required this.onMenu,
+    this.embedded = false,
+  });
 
   final int unread;
+  final VoidCallback onMenu;
   final bool embedded;
 
   @override
@@ -378,6 +416,13 @@ class _TopBar extends StatelessWidget {
               ),
             ),
           ],
+          const Spacer(),
+          IconButton(
+            icon: const Icon(Icons.more_vert_rounded,
+                size: 21, color: AppColors.textPrimary),
+            tooltip: 'More',
+            onPressed: onMenu,
+          ),
         ],
       ),
     );
@@ -549,12 +594,13 @@ class _ThreadRow extends StatelessWidget {
               children: [
                 PersonAvatar(
                   size: 50,
-                  imageUrl: person?.avatarUrl,
-                  initials: person?.initials ?? '?',
+                  imageUrl: thread.displayAvatarUrl,
+                  initials: thread.displayInitials,
                 ),
                 // The presence dot only appears when the server actually said
-                // somebody is online. Absent means unknown, not offline.
-                if (person?.online == true)
+                // somebody is online, and never on a group — a room is not
+                // online, and the dot would be claiming something nobody said.
+                if (!thread.isGroup && person?.online == true)
                   Positioned(
                     right: 1,
                     bottom: 1,
@@ -577,15 +623,30 @@ class _ThreadRow extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    person?.name ?? 'Someone',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 14.5,
-                      fontWeight: unread ? FontWeight.w800 : FontWeight.w600,
-                      color: AppColors.textPrimary,
-                    ),
+                  Row(
+                    children: [
+                      if (thread.isGroup) ...[
+                        Icon(
+                          Icons.groups_rounded,
+                          size: 15,
+                          color: AppColors.textMuted.withValues(alpha: 0.85),
+                        ),
+                        const SizedBox(width: 5),
+                      ],
+                      Flexible(
+                        child: Text(
+                          thread.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14.5,
+                            fontWeight:
+                                unread ? FontWeight.w800 : FontWeight.w600,
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 3),
                   Text(

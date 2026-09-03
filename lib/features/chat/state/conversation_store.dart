@@ -53,8 +53,15 @@ class ConversationStore extends ChangeNotifier {
   /// over a socket that may be about to die, and if it never arrives the
   /// other person appears to be typing forever. Expiring locally means the
   /// indicator is always wrong for at most four seconds.
-  bool _peerTyping = false;
-  Timer? _typingExpiry;
+  /*
+  | Who is typing, and when to stop believing each of them.
+  |
+  | A set rather than a flag, because a group can have several people typing
+  | at once and the header has to name them. One timer each: a client that
+  | disappears mid-sentence must take only itself out of the line, not
+  | everybody who happens to be typing alongside it.
+  */
+  final Map<String, Timer> _typing = {};
 
   /// Our own outgoing throttle, so a fast typist sends one frame every two
   /// seconds rather than one per keystroke.
@@ -85,7 +92,47 @@ class ConversationStore extends ChangeNotifier {
   /// Whether the other person still has to accept before more can be sent.
   bool get awaitingAcceptance => _conversation?.other?.hasAccepted == false;
 
-  bool get peerTyping => _peerTyping;
+  bool get peerTyping => _typing.isNotEmpty;
+
+  /// What the header says while somebody is writing.
+  ///
+  /// Named in a group and anonymous in a direct thread, where there is only
+  /// one person it could be. Null when nobody is typing, so the caller falls
+  /// back to whatever the line normally shows.
+  String? get typingLabel {
+    if (_typing.isEmpty) return null;
+
+    final group = _conversation?.group;
+
+    if (group == null) return 'typing…';
+
+    /*
+     | Names resolved from the member list, not from the whisper.
+     |
+     | The whisper carries an id and nothing else, precisely so that a name
+     | on screen is one the server sent rather than one a client claimed.
+     | An id that matches nobody is dropped — it is somebody who left the
+     | group between their keystroke and this frame.
+     */
+    final names = <String>[];
+
+    for (final id in _typing.keys) {
+      for (final member in group.members) {
+        if (member.id == id) {
+          names.add(member.name.split(' ').first);
+          break;
+        }
+      }
+    }
+
+    if (names.isEmpty) return 'typing…';
+    if (names.length == 1) return '${names.first} is typing…';
+
+    // The first name in full and a count for the rest: three names across a
+    // header truncates to nothing useful, and the first one is the one you
+    // were most likely waiting for.
+    return '${names.first} +${names.length - 1} are typing…';
+  }
 
   ChatMessage? get replyingTo => _replyingTo;
 
@@ -120,7 +167,7 @@ class ConversationStore extends ChangeNotifier {
   /// privacy setting, and inventing a value the server declined to state
   /// would be worse than saying nothing.
   String? get peerPresenceLabel {
-    if (_peerTyping) return 'typing…';
+    if (_typing.isNotEmpty) return 'typing…';
     if (_peerInRoom) return 'Active now';
 
     return _conversation?.other?.presenceLabel;
@@ -1132,25 +1179,32 @@ class ConversationStore extends ChangeNotifier {
         break;
 
       case 'member_removed':
-        if (_memberId(data) == _meId) return;
+        final left = _memberId(data);
+
+        if (left == _meId) return;
 
         _peerInRoom = false;
 
-        // Somebody who closed the screen is not still typing on it.
-        _typingExpiry?.cancel();
-        _peerTyping = false;
+        // Somebody who closed the screen is not still typing on it — but
+        // only them. In a group, everybody else carries on.
+        if (left != null) _typing.remove(left)?.cancel();
         break;
 
       case 'client-typing':
-        _peerTyping = data['state'] == 'typing';
+        final who = _memberId(data);
 
-        _typingExpiry?.cancel();
+        // Anonymous whispers are dropped rather than guessed at: without an
+        // id a group cannot say who is typing, and this app's own client
+        // always sends one.
+        if (who == null || who == _meId) return;
 
-        if (_peerTyping) {
-          _typingExpiry = Timer(
-            const Duration(seconds: 4),
-            _clearTyping,
-          );
+        _typing.remove(who)?.cancel();
+
+        if (data['state'] == 'typing') {
+          _typing[who] = Timer(const Duration(seconds: 4), () {
+            _typing.remove(who);
+            _rebuild();
+          });
         }
         break;
 
@@ -1205,13 +1259,19 @@ class ConversationStore extends ChangeNotifier {
     RealtimeClient.instance.whisperTyping(id, typing: false);
   }
 
+  /// Stop believing everybody at once.
+  ///
+  /// Used when a message arrives, which ends whatever its sender was typing —
+  /// and in a group is a reasonable moment to clear the rest too, since each
+  /// of them will say so again within two seconds if they are still going.
   void _clearTyping() {
-    _typingExpiry?.cancel();
-    _typingExpiry = null;
+    if (_typing.isEmpty) return;
 
-    if (!_peerTyping) return;
+    for (final timer in _typing.values) {
+      timer.cancel();
+    }
 
-    _peerTyping = false;
+    _typing.clear();
 
     _rebuild();
   }
@@ -1240,9 +1300,10 @@ class ConversationStore extends ChangeNotifier {
 
   /// Resolve every tick from the other person's two watermarks, then notify.
   void _rebuild() {
-    final other = _conversation?.other;
-    final read = other?.lastReadSeq ?? 0;
-    final delivered = other?.lastDeliveredSeq ?? 0;
+    // In a group these are the minimum across everybody still in the room,
+    // so the same tick logic serves both kinds of thread.
+    final read = _conversation?.theirReadSeq ?? 0;
+    final delivered = _conversation?.theirDeliveredSeq ?? 0;
 
     _view = [
       for (final message in _sent)
@@ -1257,7 +1318,11 @@ class ConversationStore extends ChangeNotifier {
   void dispose() {
     _disposed = true;
 
-    _typingExpiry?.cancel();
+    for (final timer in _typing.values) {
+      timer.cancel();
+    }
+
+    _typing.clear();
     _typingIdle?.cancel();
 
     final id = conversationId;

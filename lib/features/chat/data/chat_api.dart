@@ -33,6 +33,79 @@ class ChatApi {
   Future<ApiResponse> startWith(String userId) =>
       _api.post('conversations', body: {'user_id': userId});
 
+  // --- Groups ------------------------------------------------------------
+
+  /// Who I may put in a group.
+  ///
+  /// `connections` is everyone I follow, everyone who follows me, and my
+  /// family; `family` is family alone. The server enforces the same list on
+  /// create — this endpoint offers it, it does not decide it.
+  Future<ApiResponse> groupCandidates({String scope = 'connections'}) =>
+      _api.get('conversations/group-candidates?scope=$scope');
+
+  /// Create a group.
+  ///
+  /// Multipart when there is a picture, plain JSON when there is not — the
+  /// name, the people and the photo all arrive in one request either way, so
+  /// a group is never created without the picture that was chosen for it.
+  Future<ApiResponse> createGroup({
+    required String title,
+    required List<String> memberIds,
+    String scope = 'connections',
+    String? avatarPath,
+  }) {
+    if (avatarPath == null) {
+      return _api.post('conversations/group', body: {
+        'title': title,
+        'scope': scope,
+        'member_ids': memberIds,
+      });
+    }
+
+    return _api.upload(
+      'conversations/group',
+      field: 'avatar',
+      filePath: avatarPath,
+      fields: {
+        'title': title,
+        'scope': scope,
+        // Multipart fields are strings; the server decodes this one before
+        // validating it.
+        'member_ids': jsonEncode(memberIds),
+      },
+    );
+  }
+
+  /// Rename a group, change its picture, or both.
+  ///
+  /// Any member may — a group's name and face are how the room describes
+  /// itself, and being the person who created it is not a rank.
+  Future<ApiResponse> updateGroup(
+    String conversationId, {
+    String? title,
+    String? avatarPath,
+  }) {
+    if (avatarPath == null) {
+      return _api.post('conversations/$conversationId/group', body: {
+        if (title != null) 'title': title,
+      });
+    }
+
+    return _api.upload(
+      'conversations/$conversationId/group',
+      field: 'avatar',
+      filePath: avatarPath,
+      fields: {if (title != null) 'title': title},
+    );
+  }
+
+  /// Take somebody out of a group. Admins only — the server enforces it.
+  Future<ApiResponse> removeGroupMember(
+    String conversationId,
+    String userId,
+  ) =>
+      _api.delete('conversations/$conversationId/members/$userId');
+
   Future<ApiResponse> conversation(String conversationId) =>
       _api.get('conversations/$conversationId');
 
@@ -160,6 +233,12 @@ class ChatApi {
   /// per message, so there is nothing else it could mean.
   Future<ApiResponse> react(String messageId, String? emoji) =>
       _api.post('messages/$messageId/react', body: {'emoji': emoji});
+
+  /// When a message reached them, and when they read it.
+  ///
+  /// Your own messages only — the server refuses anybody else's with a 403.
+  Future<ApiResponse> messageInfo(String messageId) =>
+      _api.get('messages/$messageId/info');
 
   /// Delete for me.
   ///

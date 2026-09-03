@@ -4,7 +4,17 @@ import '../../../../core/theme/app_colors.dart';
 import '../../data/chat_models.dart';
 
 /// What a long press on a message can do.
-enum MessageAction { reply, copy, forward, pin, unpin, star, unstar, delete }
+enum MessageAction {
+  reply,
+  copy,
+  forward,
+  pin,
+  unpin,
+  star,
+  unstar,
+  info,
+  delete,
+}
 
 /// The long-press menu.
 ///
@@ -33,6 +43,7 @@ Future<MessageMenuResult?> showMessageMenu(
   required bool canCopy,
   required bool pinned,
   required bool starred,
+  bool canInfo = false,
   bool deleted = false,
   String? myReaction,
 }) {
@@ -71,6 +82,12 @@ Future<MessageMenuResult?> showMessageMenu(
               ? const _Item(MessageAction.unstar, Icons.star_rounded, 'Unstar')
               : const _Item(
                   MessageAction.star, Icons.star_outline_rounded, 'Star'),
+
+          // Your own messages only. "When did they read mine" is a question
+          // about the other person, and the server refuses it for anybody
+          // who did not write the message.
+          if (canInfo)
+            const _Item(MessageAction.info, Icons.info_outline_rounded, 'Info'),
 
           delete,
         ];

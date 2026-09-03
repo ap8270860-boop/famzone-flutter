@@ -221,6 +221,7 @@ class ChatMessage {
     this.reactions = const [],
     this.starred = false,
     this.forwarded = false,
+    this.senderId,
   });
 
   /// The client-generated id, stable from the moment the message is typed.
@@ -279,6 +280,16 @@ class ChatMessage {
   /// Held so an outgoing photo renders instantly from disk instead of waiting
   /// for the upload and then downloading back the copy we just sent.
   final String? localPath;
+
+  /// Who wrote it. Null only on a message this device made locally, which by
+  /// definition is mine.
+  ///
+  /// Needed by groups for two things a direct thread never had to ask: which
+  /// consecutive messages belong to one run, and whose name goes above it.
+  final String? senderId;
+
+  /// A line nobody typed — "Faisal created this group", "Aisha left".
+  bool get isSystem => type == MessageType.system;
 
   bool get hasMedia =>
       type == MessageType.image ||
@@ -355,6 +366,7 @@ class ChatMessage {
           .toList(),
       starred: json['starred'] as bool? ?? false,
       forwarded: json['forwarded'] as bool? ?? false,
+      senderId: json['sender_id'] as String?,
     );
   }
 
@@ -388,6 +400,66 @@ class ChatMessage {
         reactions: reactions ?? this.reactions,
         starred: starred ?? this.starred,
         forwarded: forwarded,
+        senderId: senderId,
+      );
+}
+
+/// The group half of a conversation.
+///
+/// Everything true of a group and not of a direct thread. Its presence is
+/// also what marks the conversation as a group at all — see
+/// [Conversation.isGroup].
+@immutable
+class GroupInfo {
+  const GroupInfo({
+    required this.title,
+    this.avatarUrl,
+    this.membersCount = 0,
+    this.isAdmin = false,
+    this.createdByMe = false,
+    this.lastReadSeq = 0,
+    this.lastDeliveredSeq = 0,
+    this.members = const [],
+    this.roles = const {},
+  });
+
+  final String title;
+  final String? avatarUrl;
+  final int membersCount;
+
+  /// Whether I can administer it. Nothing uses this yet — admin controls are
+  /// the next piece of work — but the info screen already marks who is one.
+  final bool isAdmin;
+  final bool createdByMe;
+
+  /// The minimum across everybody still in the room, which is what makes a
+  /// message blue only once the last person has read it.
+  final int lastReadSeq;
+  final int lastDeliveredSeq;
+
+  /// Only loaded on the single-conversation view. An inbox page of twenty
+  /// groups does not carry every member of each of them.
+  final List<ChatPerson> members;
+
+  /// Member uuid → `admin` or `member`.
+  final Map<String, String> roles;
+
+  bool isAdminOf(String userId) => roles[userId] == 'admin';
+
+  factory GroupInfo.fromJson(Map<String, dynamic> json) => GroupInfo(
+        title: json['title'] as String? ?? 'Group',
+        avatarUrl: json['avatar_url'] as String?,
+        membersCount: json['members_count'] as int? ?? 0,
+        isAdmin: json['is_admin'] as bool? ?? false,
+        createdByMe: json['created_by_me'] as bool? ?? false,
+        lastReadSeq: json['last_read_seq'] as int? ?? 0,
+        lastDeliveredSeq: json['last_delivered_seq'] as int? ?? 0,
+        members: (json['members'] as List<dynamic>? ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(ChatPerson.fromJson)
+            .toList(),
+        roles: (json['roles'] as Map<String, dynamic>? ?? const {})
+            .map((key, value) => MapEntry(key, '$value')),
       );
 }
 
@@ -479,7 +551,17 @@ class ChatPerson {
 
   factory ChatPerson.fromJson(Map<String, dynamic> json) {
     return ChatPerson(
-      id: json['user_id'] as String? ?? '',
+      /*
+       | Two spellings, because this class is fed from two places.
+       |
+       | The chat payload calls it `user_id` (presentPerson); the people
+       | payload calls it `id` (RelationshipService::summaries), which is
+       | what the group member list and the candidate picker are built from.
+       | Reading only the first left every person with an empty id — and
+       | since the picker compares people by id, selecting one appeared to
+       | select all of them.
+       */
+      id: json['user_id'] as String? ?? json['id'] as String? ?? '',
       name: json['name'] as String? ?? 'Someone',
       username: json['username'] as String?,
       avatarUrl: json['avatar_url'] as String?,
@@ -511,6 +593,7 @@ class Conversation {
     this.pinned = false,
     this.markedUnread = false,
     this.archived = false,
+    this.group,
   });
 
   final String id;
@@ -550,6 +633,42 @@ class Conversation {
   /// Put away in the Archived list. Not deleted and not muted: every message
   /// is still there and it still notifies — it is only somewhere else.
   final bool archived;
+
+  /// Set on a group and null on a direct thread, so one field tells the two
+  /// apart rather than a string comparison on `type`.
+  final GroupInfo? group;
+
+  bool get isGroup => group != null;
+
+  /// What the row and the header call this thread.
+  String get displayName => group?.title ?? other?.name ?? 'Someone';
+
+  String? get displayAvatarUrl => group?.avatarUrl ?? other?.avatarUrl;
+
+  /// Up to two initials, for the avatar fallback.
+  String get displayInitials {
+    final source = group?.title ?? other?.name ?? '';
+    final parts =
+        source.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+
+    if (parts.isEmpty) return '?';
+    if (parts.length == 1) return parts.first[0].toUpperCase();
+
+    return (parts.first[0] + parts.last[0]).toUpperCase();
+  }
+
+  /*
+  | How far the other side has got.
+  |
+  | In a group the server reports the minimum across everybody still in the
+  | room, in the same shape a direct thread reports one person — so a message
+  | turns blue only once the last of them has read it, and every tick in the
+  | app is drawn by the same code either way.
+  */
+  int get theirReadSeq => group?.lastReadSeq ?? other?.lastReadSeq ?? 0;
+
+  int get theirDeliveredSeq =>
+      group?.lastDeliveredSeq ?? other?.lastDeliveredSeq ?? 0;
 
   final int myReadSeq;
   final int myDeliveredSeq;
@@ -606,6 +725,9 @@ class Conversation {
       pinned: json['pinned'] as bool? ?? false,
       markedUnread: json['marked_unread'] as bool? ?? false,
       archived: json['archived'] as bool? ?? false,
+      group: json['group'] is Map<String, dynamic>
+          ? GroupInfo.fromJson(json['group'] as Map<String, dynamic>)
+          : null,
     );
   }
 
@@ -618,6 +740,7 @@ class Conversation {
     bool? pinned,
     bool? markedUnread,
     bool? archived,
+    GroupInfo? group,
     ChatMessage? lastMessage,
     DateTime? lastMessageAt,
     int? myReadSeq,
@@ -644,6 +767,7 @@ class Conversation {
         pinned: pinned ?? this.pinned,
         markedUnread: markedUnread ?? this.markedUnread,
         archived: archived ?? this.archived,
+        group: group ?? this.group,
       );
 
   /// "19:04", "Yesterday", "12 Aug" — the right-hand column of an inbox row.
@@ -707,12 +831,27 @@ class MessageGroup {
       }
 
       final previous = current.last;
-      final sameSender = previous.isMine == message.isMine;
+
+      /*
+       | Compared on the sender, not merely on "is it mine".
+       |
+       | In a direct thread those are the same question. In a group they are
+       | not: two different people's messages would otherwise be drawn as one
+       | run under one name, which is the kind of bug that makes somebody
+       | appear to have said something they did not.
+       */
+      final sameSender = previous.isMine == message.isMine &&
+          previous.senderId == message.senderId;
+
+      // A system line never joins a run. It is not from anybody in the sense
+      // the run means, and it is drawn as a chip across the middle.
+      final ordinary = !previous.isSystem && !message.isSystem;
+
       final closeInTime =
           message.sentAt.difference(previous.sentAt).abs() <= window;
       final sameDay = _sameDay(previous.sentAt, message.sentAt);
 
-      if (sameSender && closeInTime && sameDay) {
+      if (sameSender && ordinary && closeInTime && sameDay) {
         current.add(message);
       } else {
         groups.add(MessageGroup(messages: current));

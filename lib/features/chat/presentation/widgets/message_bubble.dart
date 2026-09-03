@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../core/theme/app_colors.dart';
+import '../../../people/presentation/widgets/person_avatar.dart';
 import '../../data/chat_models.dart';
 import '../image_viewer.dart';
 import 'voice_bubble.dart';
@@ -21,6 +22,7 @@ class MessageGroupView extends StatelessWidget {
     this.onReactionTap,
     this.onQuoteTap,
     this.highlightedId,
+    this.sender,
   });
 
   final MessageGroup group;
@@ -39,6 +41,11 @@ class MessageGroupView extends StatelessWidget {
   /// was the destination defeats the point of jumping.
   final String? highlightedId;
 
+  /// Who wrote this run, in a group. Null in a direct thread, where there is
+  /// only one person it could be and naming them on every message would be
+  /// noise.
+  final ChatPerson? sender;
+
   /// Long press on one bubble. Carries the global position so the menu can
   /// be anchored to the message rather than to the screen.
   final void Function(ChatMessage message, Offset at)? onLongPress;
@@ -47,12 +54,31 @@ class MessageGroupView extends StatelessWidget {
   Widget build(BuildContext context) {
     final mine = group.isMine;
 
-    return Padding(
+    // A group puts a face beside the run and a name above it, both only on
+    // incoming messages: your own bubbles are already unambiguous, and
+    // repeating your own name down the right-hand side would be strange.
+    final showSender = sender != null && !mine;
+
+    final run = Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Column(
         crossAxisAlignment:
             mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
+          if (showSender)
+            Padding(
+              padding: const EdgeInsets.only(left: 12, bottom: 3),
+              child: Text(
+                sender!.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                  color: _senderTint(sender!.id),
+                ),
+              ),
+            ),
           for (var i = 0; i < group.messages.length; i++)
             Padding(
               padding: EdgeInsets.only(
@@ -95,6 +121,87 @@ class MessageGroupView extends StatelessWidget {
           const SizedBox(height: 5),
           _Meta(message: group.last, mine: mine),
         ],
+      ),
+    );
+
+    if (!showSender) return run;
+
+    // The avatar sits against the bottom of the run, beside the last bubble,
+    // so a long run reads as one block from one person rather than a column
+    // with a face floating at the top of it.
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(right: 8, bottom: 18),
+          child: PersonAvatar(
+            size: 28,
+            imageUrl: sender!.avatarUrl,
+            initials: sender!.initials,
+            fontSize: 11,
+          ),
+        ),
+        Flexible(child: run),
+      ],
+    );
+  }
+
+  /// A stable colour per person, from their id.
+  ///
+  /// The same face and the same colour every time they speak is what lets a
+  /// busy group be skimmed without reading a single name.
+  static Color _senderTint(String id) {
+    const palette = [
+      AppColors.aqua,
+      AppColors.mint,
+      AppColors.warmGold,
+      AppColors.neonPink,
+      AppColors.neonPurple,
+      AppColors.neonCyan,
+    ];
+
+    var hash = 0;
+
+    for (final unit in id.codeUnits) {
+      hash = (hash * 31 + unit) & 0x7fffffff;
+    }
+
+    return palette[hash % palette.length];
+  }
+}
+
+/// A line nobody typed, across the middle of the thread.
+///
+/// "Faisal created this group", "Aisha left". Centred and quiet, because it
+/// is scenery rather than conversation — and deliberately not a bubble, which
+/// would imply somebody said it out loud.
+class SystemNote extends StatelessWidget {
+  const SystemNote({super.key, required this.message});
+
+  final ChatMessage message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            color: Colors.white.withValues(alpha: 0.06),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+          ),
+          child: Text(
+            message.body,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 11.5,
+              height: 1.35,
+              color: AppColors.textMuted,
+            ),
+          ),
+        ),
       ),
     );
   }

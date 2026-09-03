@@ -20,7 +20,9 @@ import '../state/voice_player.dart';
 import '../state/voice_recorder.dart';
 import 'attachment_preview_screen.dart';
 import 'forward_sheet.dart';
+import 'group_info_screen.dart';
 import 'widgets/attach_sheet.dart';
+import 'widgets/message_info_sheet.dart';
 import 'widgets/message_menu.dart';
 import 'widgets/message_bubble.dart';
 import 'widgets/voice_recorder_bar.dart';
@@ -265,6 +267,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _openProfile() {
+    // Tapping the header of a group opens the group, not a person.
+    if (_isGroup) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => GroupInfoScreen(store: _store, meId: _store.meId),
+        ),
+      );
+
+      return;
+    }
+
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => UserProfileScreen(userId: widget.userId),
@@ -290,6 +303,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       context,
       at: at,
       canCopy: message.body.isNotEmpty && !message.deleted,
+      // Info answers "when did they read this", which only makes sense about
+      // something you sent and which the server refuses for anything else.
+      canInfo: message.isMine && message.remoteId != null,
       // A tombstone gets a menu of one: clear it from your own side.
       deleted: message.deleted,
       // Both are toggles, so the menu needs to know which way round to draw
@@ -332,6 +348,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       case MessageAction.star:
       case MessageAction.unstar:
         await _store.toggleStar(message);
+
+      case MessageAction.info:
+        await showMessageInfoSheet(context, message);
 
       case MessageAction.delete:
         await _confirmDelete(message);
@@ -728,7 +747,34 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// A bottom sheet rather than a popup menu: a popup anchored to the top-right
   /// corner puts destructive actions under the thumb's least accurate reach,
   /// and every other menu in the app is a sheet.
+  /// Set while this thread is a group, and the switch behind most of what
+  /// this screen renders differently.
+  GroupInfo? get _group => _store.conversation?.group;
+
+  /*
+  | Whether this thread is a group, answerable before it has loaded.
+  |
+  | [_group] is null for the first moment of every group screen, while the
+  | conversation is still being fetched. Tapping the title in that window used
+  | to fall through to a user profile for an empty id — the "not found" page
+  | that went away if you came back and tapped again. A group is opened
+  | without a peer id, so the absence of one settles it immediately.
+  */
+  bool get _isGroup => _group != null || widget.userId.isEmpty;
+
   Future<void> _openMenu() async {
+    // A group has no profile to view and nobody to block: those are acts
+    // against a person, and the menu offers what the thread actually has.
+    if (_isGroup) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => GroupInfoScreen(store: _store, meId: _store.meId),
+        ),
+      );
+
+      return;
+    }
+
     final choice = await showModalBottomSheet<_ChatAction>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -886,13 +932,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               return Column(
                 children: [
                   _Header(
-                    name: person?.name ?? widget.name,
+                    name: _store.conversation?.displayName ??
+                        person?.name ??
+                        widget.name,
                     username: person?.username ?? widget.username,
-                    avatarUrl: person?.avatarUrl ?? widget.avatarUrl,
-                    initials: person?.initials ?? widget.initials,
-                    // Live presence beats whatever the caller knew: typing,
-                    // then "Active now", then last seen.
-                    presence: _store.peerPresenceLabel ?? widget.presence,
+                    avatarUrl: _store.conversation?.displayAvatarUrl ??
+                        person?.avatarUrl ??
+                        widget.avatarUrl,
+                    initials: _store.conversation?.displayInitials ??
+                        person?.initials ??
+                        widget.initials,
+                    // A group says how many are in it where a direct thread
+                    // says whether one person is online — presence is about a
+                    // person, and a room does not have one.
+                    // Typing wins over both, and names who it is in a group.
+                    presence: _group == null
+                        ? (_store.peerPresenceLabel ?? widget.presence)
+                        : (_store.typingLabel ??
+                            (_group!.membersCount == 1
+                                ? '1 member'
+                                : '${_group!.membersCount} members')),
                     typing: _store.peerTyping,
                     onMenu: _openMenu,
                     onTapPerson: _openProfile,
@@ -1030,6 +1089,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final rows = <Widget>[];
     DateTime? lastDay;
 
+    /*
+     | Who wrote what, in a group.
+     |
+     | Built once per list rather than looked up per bubble, and empty in a
+     | direct thread — where there is only one person it could be, and naming
+     | them above every message would be noise.
+     */
+    final senders = <String, ChatPerson>{
+      for (final member in _group?.members ?? const <ChatPerson>[])
+        member.id: member,
+    };
+
     // Rebuilt from scratch: a message that has left the window must not keep
     // a row index pointing at whatever now sits there.
     _messageKeys.clear();
@@ -1065,7 +1136,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         _messageRows[id] = rows.length;
       }
 
+      // A system line is scenery, not conversation: no bubble, no avatar, no
+      // long-press menu.
+      if (group.messages.first.isSystem) {
+        for (final message in group.messages) {
+          rows.add(SystemNote(message: message));
+        }
+
+        continue;
+      }
+
       final failed = group.last.failed;
+      final sender = senders[group.messages.first.senderId ?? ''];
 
       rows.add(
         failed
@@ -1087,6 +1169,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       onReactionTap: _store.react,
                       onQuoteTap: _onQuoteTap,
                       highlightedId: _highlightedId,
+                      sender: sender,
                     ),
                     const Padding(
                       padding: EdgeInsets.only(right: 6, bottom: 10),
@@ -1109,6 +1192,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 onReactionTap: _store.react,
                 onQuoteTap: _onQuoteTap,
                 highlightedId: _highlightedId,
+                sender: sender,
               ),
       );
     }

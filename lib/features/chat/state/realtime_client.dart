@@ -200,7 +200,20 @@ class RealtimeClient extends ChangeNotifier {
     _socket?.whisper(
       'presence-room.$conversationUuid',
       'client-typing',
-      {'state': typing ? 'typing' : 'stopped'},
+      {
+        'state': typing ? 'typing' : 'stopped',
+
+        /*
+         | Who is typing, so a group can name them.
+         |
+         | The id and not the name: a whisper is relayed by Reverb without
+         | passing through the server, so anything in it is whatever the
+         | sending client chose to put there. An id is checked against the
+         | member list the server sent; a name would be taken on trust and
+         | could say anything.
+         */
+        'user_id': Session.instance.user?.id,
+      },
     );
   }
 
