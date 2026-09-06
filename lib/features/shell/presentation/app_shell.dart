@@ -4,10 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/widgets/pulse_rings.dart';
 import '../../chat/presentation/inbox_screen.dart';
 import '../../chat/state/chat_store.dart';
 import '../../chat/state/realtime_client.dart';
 import '../../home/presentation/home_screen.dart';
+import '../../sos/presentation/sos_screen.dart';
+import '../../sos/presentation/widgets/incoming_sos_banner.dart';
+import '../../sos/state/sos_store.dart';
 import 'app_drawer.dart';
 import 'placeholder_tab.dart';
 
@@ -51,6 +55,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // the only way to find out you have unread messages is to go looking for
     // them, which rather defeats the point of a badge.
     ChatStore.instance.refreshBadge();
+
+    /*
+     | Fetch the emergency catalogue up front, quietly.
+     |
+     | The one screen that must never show a spinner is this one, and the
+     | moment somebody opens it is the moment they have the least patience
+     | for a round trip. It also restores an alert that was still running
+     | when the app was last closed.
+     */
+    SosStore.instance.load(quiet: true);
   }
 
   @override
@@ -86,7 +100,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         drawer: const AppDrawer(),
         backgroundColor: AppColors.canvas,
         extendBody: true, // the bar floats over the content
-        body: IndexedStack(
+        body: Stack(
+          children: [
+            IndexedStack(
           // Loose is the default, which leaves a tab free to size to its
           // content instead of the screen. Expand forces a full-height tab.
           sizing: StackFit.expand,
@@ -108,6 +124,23 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               icon: Icons.person_rounded,
               title: 'Profile',
               message: 'Your details, privacy and subscription.',
+            ),
+          ],
+        ),
+
+            /*
+             | A family member's alarm, above every tab.
+             |
+             | Mounted here rather than pushed as a route so it reaches the
+             | person on whatever screen they happen to be looking at, and
+             | cannot be buried by whatever they navigate to next. It draws
+             | nothing at all when there is no alarm.
+             */
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: IncomingSosBanner(),
             ),
           ],
         ),
@@ -136,13 +169,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (index == 1) ChatStore.instance.refresh();
   }
 
-  /// SOS is destructive and irreversible once sent, so it always confirms.
-  /// A press-and-hold gesture replaces this when the real flow is built.
+  /// Open the emergency screen.
+  ///
+  /// No confirmation sheet here any more — the hold-to-activate gesture on
+  /// the screen itself is the confirmation, and it is a better one. A dialog
+  /// asking "are you sure" is one tap away from being dismissed by the same
+  /// accident that opened it.
   void _confirmSos(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => const _SosSheet(),
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const SosScreen()),
     );
   }
 }
@@ -333,120 +368,77 @@ class _SosButton extends StatelessWidget {
   final VoidCallback onTap;
   final double diameter;
 
+  /// How far the wave reaches, as a multiple of the button.
+  ///
+  /// Kept modest. This is permanent chrome — on screen on every tab, all day
+  /// — so it has to register peripherally and then be ignorable. A wave that
+  /// swept half the bar would be noticed once and resented thereafter.
+  static const double _waveSpread = 1.55;
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Container(
+      /*
+       | Exactly the diameter, exactly as before.
+       |
+       | The box does not grow to fit the wave — the wave is painted past the
+       | edge of it. That keeps the footprint the bar was measured for, and
+       | it is why an earlier attempt with OverflowBox broke the layout:
+       | OverflowBox sizes from its parent's constraints, not from the max it
+       | is given, so under a Stack's loose constraints it collapsed.
+       |
+       | Nothing clips the overspill: the nav bar's own Stack is already
+       | Clip.none for the button's overhang.
+       */
+      child: SizedBox(
         width: diameter,
         height: diameter,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: AppColors.sosGradient,
-          // Dark ring, so the button reads as sitting on top of the bar
-          // rather than being cut out of it.
-          border: Border.all(color: AppColors.canvas, width: 3.5),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF62E487).withValues(alpha: 0.42),
-              blurRadius: 22,
-              spreadRadius: 1,
-            ),
-          ],
-        ),
-        child: const Center(
-          child: Text(
-            'SOS',
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 0.4,
-              color: Color(0xFF03202E),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SosSheet extends StatelessWidget {
-  const _SosSheet();
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Container(
-        margin: const EdgeInsets.all(16),
-        padding: const EdgeInsets.fromLTRB(22, 26, 22, 22),
-        decoration: BoxDecoration(
-          color: AppColors.canvasRaised,
-          borderRadius: BorderRadius.circular(26),
-          border: Border.all(color: AppColors.glassBorder),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
           children: [
+            Positioned.fill(
+              child: PulseRings(
+                // The same green the button's own glow uses, so the wave
+                // reads as the button breathing rather than as a second
+                // thing sitting behind it.
+                color: const Color(0xFF62E487),
+                innerRadius: diameter / 2,
+                outerRadius: diameter * _waveSpread / 2,
+                period: const Duration(milliseconds: 2800),
+                peakOpacity: 0.38,
+              ),
+            ),
             Container(
-              width: 58,
-              height: 58,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: AppColors.alertRed.withValues(alpha: 0.15),
-                border: Border.all(
-                  color: AppColors.alertRed.withValues(alpha: 0.4),
-                ),
-              ),
-              child: const Icon(Icons.emergency_rounded,
-                  size: 28, color: AppColors.alertRed),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Send an SOS alert?',
-              style: TextStyle(
-                fontSize: 19,
-                fontWeight: FontWeight.w700,
-                color: AppColors.textPrimary,
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Everyone in your circle gets a push, an in-app alert and an '
-              'SMS with your current location.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 13.5,
-                height: 1.45,
-                color: AppColors.textMuted,
-              ),
-            ),
-            const SizedBox(height: 22),
-            Row(
-              children: [
-                Expanded(
-                  child: TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    style: TextButton.styleFrom(
-                      foregroundColor: AppColors.textMuted,
-                      minimumSize: const Size.fromHeight(50),
-                    ),
-                    child: const Text('Cancel'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppColors.alertRed,
-                      foregroundColor: Colors.white,
-                      minimumSize: const Size.fromHeight(50),
-                    ),
-                    child: const Text('Send SOS'),
-                  ),
+            width: diameter,
+            height: diameter,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: AppColors.sosGradient,
+              // Dark ring, so the button reads as sitting on top of the bar
+              // rather than being cut out of it.
+              border: Border.all(color: AppColors.canvas, width: 3.5),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF62E487).withValues(alpha: 0.42),
+                  blurRadius: 22,
+                  spreadRadius: 1,
                 ),
               ],
+            ),
+              child: const Center(
+                child: Text(
+                  'SOS',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.4,
+                    color: Color(0xFF03202E),
+                  ),
+                ),
+              ),
             ),
           ],
         ),

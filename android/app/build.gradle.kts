@@ -1,8 +1,31 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
+
+/*
+ | The Google Maps key, out of local.properties.
+ |
+ | local.properties is gitignored and machine-local, which is exactly the
+ | right place for it: the key never enters the repository, every developer
+ | can hold their own, and CI supplies it as an environment variable without
+ | anything in the build script changing.
+ |
+ | Empty is a valid state and builds fine — the map renders as a grey grid
+ | with "For development purposes only" across it, which is a far better
+ | failure than a build that will not compile.
+ */
+val mapsApiKey: String = Properties().apply {
+    val properties = rootProject.file("local.properties")
+
+    if (properties.exists()) {
+        FileInputStream(properties).use { load(it) }
+    }
+}.getProperty("MAPS_API_KEY") ?: ""
 
 android {
     namespace = "co.sfamily.famzone"
@@ -17,6 +40,9 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "co.sfamily.famzone"
+
+        // Substituted into ${MAPS_API_KEY} in AndroidManifest.xml.
+        manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         // Pinned rather than inherited: the record plugin needs 23,

@@ -5,6 +5,17 @@
 	<!-- Shown verbatim in the system prompt. Vague wording here is a
 	     common App Store rejection, and is also just worse for the
 	     person deciding. -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SFamily uses your location so the people you choose can see you on the map, and so you can share where you are in a chat. You decide who sees it and for how long.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Allow “Always” so your family can still see you when SFamily isn’t open. Your location is only ever sent while a share you started is running, and you can stop it at any time.</string>
+	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
+	<dict>
+		<key>PreciseLocationForSharing</key>
+		<string>SFamily needs your precise location so the map shows where you actually are rather than the area you are in.</string>
+	</dict>
+	<key>MapsApiKey</key>
+	<string>$(MAPS_API_KEY)</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SFamily uses the microphone so you can send voice messages in your chats.</string>
 	<key>NSCameraUsageDescription</key>
@@ -33,6 +44,10 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

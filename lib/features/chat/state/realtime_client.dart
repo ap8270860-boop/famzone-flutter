@@ -7,6 +7,8 @@ import 'package:http/http.dart' as http;
 import '../../../core/config/app_config.dart';
 import '../../../core/realtime/reverb_socket.dart';
 import '../../../core/session/session.dart';
+import '../../location/state/location_store.dart';
+import '../../sos/state/sos_store.dart';
 import '../data/chat_api.dart';
 import 'chat_store.dart';
 
@@ -190,6 +192,31 @@ class RealtimeClient extends ChangeNotifier {
     await _socket?.unsubscribe('presence-room.$uuid');
   }
 
+  /*
+  |----------------------------------------------------------------------------
+  | Location
+  |----------------------------------------------------------------------------
+  */
+
+  /// Follow one person's position.
+  ///
+  /// The channel is named after the person being watched, not the person
+  /// watching — so six family members following one phone is one frame out of
+  /// the server rather than six, and a seventh watcher costs the broadcaster
+  /// nothing.
+  ///
+  /// Authorisation happens server-side on subscribe, against a live share.
+  /// There is no client-side filtering here, and there must not be: a frame
+  /// that reaches a client that should not have it has already leaked.
+  Future<void> joinLocation(String userUuid, ChannelHandler onEvent) async {
+    await start();
+    await _socket?.subscribe('private-location.$userUuid', onEvent);
+  }
+
+  Future<void> leaveLocation(String userUuid) async {
+    await _socket?.unsubscribe('private-location.$userUuid');
+  }
+
   /// Say whether we are typing, straight to the other subscriber.
   ///
   /// Reverb relays client events without waking PHP, touching the database or
@@ -229,6 +256,40 @@ class RealtimeClient extends ChangeNotifier {
         // A full conversation summary, the same shape the inbox endpoint
         // returns, so the store folds it in without a round trip.
         ChatStore.instance.applyInboxEvent(data);
+
+        return;
+
+      case 'sos.raised':
+        /*
+         | A family member raised an alarm.
+         |
+         | Handed to the store rather than pushed onto the navigator: the
+         | banner has to survive whatever screen the person is on, and an
+         | alarm that can be dismissed with the back gesture is not an alarm.
+         */
+        SosStore.instance.applyIncoming(data);
+
+        return;
+
+      case 'sos.ended':
+        SosStore.instance.clearIncoming(data);
+
+        return;
+
+      case 'location.share.started':
+        /*
+         | Somebody started sharing with me.
+         |
+         | On the mailbox rather than the location channel because it has to
+         | reach me *before* I am subscribed to their channel — being told to
+         | subscribe is the whole point of the event.
+         */
+        LocationStore.instance.applyShareStarted(data);
+
+        return;
+
+      case 'location.share.ended':
+        LocationStore.instance.applyShareEnded(data);
 
         return;
 

@@ -1,1 +1,5 @@
 #include "Generated.xcconfig"
+
+// Optional include: a checkout with no Maps.xcconfig still builds,
+// with an empty key and a grey map, rather than failing to configure.
+#include? "Maps.xcconfig"

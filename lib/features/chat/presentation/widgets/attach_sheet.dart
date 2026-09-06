@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../../core/theme/app_colors.dart';
 
 /// What the + button offers.
-enum AttachChoice { camera, gallery, document }
+enum AttachChoice { camera, gallery, document, location }
 
 /// The attachment sheet.
 ///
@@ -70,6 +70,12 @@ class _AttachSheet extends StatelessWidget {
                 tint: AppColors.neonPurple,
                 onTap: () => Navigator.of(context).pop(AttachChoice.document),
               ),
+              _Tile(
+                icon: Icons.near_me_rounded,
+                label: 'Location',
+                tint: AppColors.warmGold,
+                onTap: () => Navigator.of(context).pop(AttachChoice.location),
+              ),
             ],
           ),
         ],
@@ -97,7 +103,8 @@ class _Tile extends StatelessWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: SizedBox(
-        width: 88,
+        // Four across has to fit a 320 dp screen without overflowing.
+        width: 76,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [

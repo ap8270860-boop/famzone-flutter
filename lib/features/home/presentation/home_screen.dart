@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../../../core/session/session.dart';
 import '../../../core/session/session_sync.dart';
 import '../../../core/widgets/app_toast.dart';
+import '../../location/presentation/live_map_screen.dart';
+import '../../sos/presentation/sos_screen.dart';
 import '../../people/presentation/notifications_screen.dart';
 import '../../people/presentation/search_people_screen.dart';
 import '../../people/presentation/user_profile_screen.dart';
@@ -50,6 +52,33 @@ class _HomeScreenState extends State<HomeScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const SearchPeopleScreen()),
     );
+  }
+
+  /// The four shortcuts under the status card.
+  ///
+  /// Only two of them lead anywhere yet. The rest deliberately say so rather
+  /// than doing nothing: a tile that swallows a tap reads as a broken app,
+  /// where one that says "coming soon" reads as an unfinished one.
+  void _onQuickAction(String key) {
+    switch (key) {
+      case 'sos':
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => const SosScreen()),
+        );
+
+        return;
+
+      case 'location':
+      case 'circle':
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+        );
+
+        return;
+
+      default:
+        AppToast.show(context, 'Coming soon.');
+    }
   }
 
   Future<void> _openNotifications() async {
@@ -158,7 +187,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 14),
 
-              const QuickActions(),
+              QuickActions(onTap: _onQuickAction),
               const SizedBox(height: 14),
 
               CheckInCard(

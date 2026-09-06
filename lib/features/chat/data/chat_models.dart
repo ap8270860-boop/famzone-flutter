@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
+import '../../location/data/location_models.dart';
+
 /// How far a message has got.
 ///
 /// Ordered deliberately: every later state implies the ones before it, so a
@@ -37,6 +39,9 @@ class MessageType {
   static const String file = 'file';
   static const String audio = 'audio';
   static const String system = 'system';
+
+  /// A dropped pin, or a live share announcing itself.
+  static const String location = 'location';
 }
 
 /// A file hanging off a message.
@@ -222,6 +227,7 @@ class ChatMessage {
     this.starred = false,
     this.forwarded = false,
     this.senderId,
+    this.location,
   });
 
   /// The client-generated id, stable from the moment the message is typed.
@@ -288,8 +294,18 @@ class ChatMessage {
   /// consecutive messages belong to one run, and whose name goes above it.
   final String? senderId;
 
+  /// Coordinates, when this message is a pin or a live share.
+  ///
+  /// Null for every other type. A live one carries the state of the share it
+  /// announced, which is what lets the bubble stop claiming to be current the
+  /// moment the share ends — the server re-broadcasts the message on stop for
+  /// exactly that reason.
+  final MessageLocation? location;
+
   /// A line nobody typed — "Faisal created this group", "Aisha left".
   bool get isSystem => type == MessageType.system;
+
+  bool get isLocation => type == MessageType.location;
 
   bool get hasMedia =>
       type == MessageType.image ||
@@ -367,6 +383,10 @@ class ChatMessage {
       starred: json['starred'] as bool? ?? false,
       forwarded: json['forwarded'] as bool? ?? false,
       senderId: json['sender_id'] as String?,
+      location: json['location'] is Map<String, dynamic>
+          ? MessageLocation.fromJson(
+              json['location'] as Map<String, dynamic>)
+          : null,
     );
   }
 
@@ -401,6 +421,7 @@ class ChatMessage {
         starred: starred ?? this.starred,
         forwarded: forwarded,
         senderId: senderId,
+        location: location,
       );
 }
 

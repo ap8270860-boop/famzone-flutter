@@ -61,6 +61,36 @@ dependencies:
   audio_session: ^0.2.4
   path_provider: ^2.1.0
 
+  # Live location.
+  #
+  # geolocator is the position stream, the permission ladder and the
+  # platform-specific settings that decide how hard the GPS works —
+  # everything except drawing. It needs no API key and costs nothing.
+  #
+  # google_maps_flutter is only the drawing, and it is the one that
+  # needs a key. Keeping that distinction clear matters: the whole
+  # tracking pipeline works without a key, so a missing or throttled
+  # key degrades to "no map", never to "no location".
+  #
+  # No permission_handler: geolocator already covers every location
+  # permission on both platforms, and a second permissions plugin is
+  # two sources of truth for one answer. It comes back if and when
+  # notifications need one.
+  # ^14.0.2, not ^14.0.3, and the reason is worth writing down.
+  #
+  # 14.0.3 added a geolocator_linux dependency that pulls in win32 ^6,
+  # while file_picker is pinned at 8.3.7 and wants win32 ^5.9. Neither
+  # package is ever compiled into an Android or iOS build — win32 is
+  # Windows-desktop, geolocator_linux is Linux — but pub has to solve
+  # for every declared platform, so it fails anyway.
+  #
+  # The caret still permits 14.0.3 and above. Pub simply picks 14.0.2
+  # today and will move up on its own the day file_picker is upgraded
+  # past its win32 ^5.9 pin. Nothing in this app uses anything added
+  # in 14.0.3.
+  geolocator: ^14.0.2
+  google_maps_flutter: ^2.5.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

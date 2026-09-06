@@ -8,6 +8,8 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_toast.dart';
+import '../../location/presentation/widgets/share_location_sheet.dart';
+import '../../location/state/location_permissions.dart';
 import '../../../core/widgets/aurora_background.dart';
 import '../../people/data/people_api.dart';
 import '../../people/presentation/user_profile_screen.dart';
@@ -662,7 +664,35 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         await _pickImage(ImageSource.gallery);
       case AttachChoice.document:
         await _pickDocument();
+      case AttachChoice.location:
+        await _shareLocation();
     }
+  }
+
+  /// Send a pin, or start a live share, into this thread.
+  ///
+  /// Permission is asked for here rather than inside the sheet, so somebody
+  /// who declines never sees a menu of options none of which can work. The
+  /// sheet itself does the sending — it is the same sheet the map uses, and
+  /// the bubble arrives over the socket like any other message.
+  Future<void> _shareLocation() async {
+    final access = await LocationPermissions.ensure(context);
+
+    if (!mounted || !access.canTrack) return;
+
+    final conversationId = _store.conversationId;
+
+    if (conversationId == null) {
+      AppToast.error(context, 'Open the chat before sharing a location.');
+
+      return;
+    }
+
+    await showShareLocationSheet(
+      context,
+      conversationId: conversationId,
+      threadName: _store.person?.name ?? widget.name,
+    );
   }
 
   /// Pick any file and send it.

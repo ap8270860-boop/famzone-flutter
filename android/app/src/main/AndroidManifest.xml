@@ -8,6 +8,48 @@
          decline. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
 
+    <!-- Live location.
+
+         COARSE is declared alongside FINE because Android 12 and up let the
+         user grant "approximate" instead of "precise" from the same prompt.
+         An app that only declares FINE gets nothing at all when they choose
+         approximate, rather than a rougher position it could still use.
+
+         BACKGROUND is the separate, second permission — never bundled into
+         the first prompt, requested only when a family share is running, and
+         the one the Play Store requires a written justification and a demo
+         video for. Declaring it does not request it.
+
+         FOREGROUND_SERVICE_LOCATION is required from Android 14 on for the
+         ongoing notification that keeps tracking alive while the app is not
+         on screen. Without it the service throws on start rather than
+         degrading. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+
+    <!-- Required by the foreground service, and easy to miss.
+
+         geolocator takes a partial wake lock when enableWakeLock is set on
+         ForegroundNotificationConfig, so that fixes keep arriving with the
+         screen off — which is the entire point of background tracking on a
+         phone in somebody's pocket. It does not merge this permission in
+         from its own manifest, and without it obtainWakeLocks throws a
+         SecurityException that kills the position stream before the first
+         fix. Nothing else fails, which is what makes it confusing: the
+         share starts, the socket connects, and the coordinates are simply
+         never there. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+
+    <!-- So the phone is not woken constantly on a device with no GPS at all
+         (a tablet, an emulator) — the feature is declared optional rather
+         than required, which also keeps the app installable on them. -->
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false"/>
+
     <application
         android:label="SFamily"
         android:name="${applicationName}"
@@ -48,6 +90,22 @@
             android:name="com.yalantis.ucrop.UCropActivity"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.AppCompat.Light.NoActionBar"/>
+        <!-- The Google Maps key.
+
+             Injected from android/local.properties at build time (see
+             build.gradle.kts), which is gitignored — so the key is not in
+             the repository and rotating it is a one-line edit rather than a
+             commit.
+
+             It is not a secret in the way REVERB_APP_SECRET is. A maps key
+             shipped in any mobile app can be extracted from the binary; what
+             actually protects it is the package-name and SHA-1 restriction
+             set on it in the Google Cloud console, which makes a stolen key
+             useless to anybody else. -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="${MAPS_API_KEY}"/>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -63,6 +121,30 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+
+        <!-- The phone dialler.
+
+             Android 11 hides other installed apps from this one unless they
+             are declared here. Without it url_launcher cannot resolve a
+             `tel:` URI, so every Call button on the SOS screen silently does
+             nothing — which is the worst possible way for an emergency
+             button to fail, because it fails without saying so.
+
+             ACTION_DIAL, not ACTION_CALL: the number is put into the dialler
+             and the person still presses the green button. An app that
+             placed the call itself would place one every time somebody
+             brushed the screen. -->
+        <intent>
+            <action android:name="android.intent.action.DIAL"/>
+            <data android:scheme="tel"/>
+        </intent>
+
+        <!-- Maps and web links: cybercrime.gov.in, directions to a hospital,
+             a shared location pin opening in Google Maps. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
         </intent>
     </queries>
 </manifest>

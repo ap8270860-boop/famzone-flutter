@@ -7,6 +7,7 @@ import '../../../../core/theme/app_colors.dart';
 import '../../../people/presentation/widgets/person_avatar.dart';
 import '../../data/chat_models.dart';
 import '../image_viewer.dart';
+import 'location_bubble.dart';
 import 'voice_bubble.dart';
 
 /// One run of messages from the same person.
@@ -274,6 +275,13 @@ class _Bubble extends StatelessWidget {
       return Align(
         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
         child: VoiceBubble(message: message, radius: radius, mine: mine),
+      );
+    }
+
+    if (message.type == MessageType.location) {
+      return Align(
+        alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+        child: LocationBubble(message: message, radius: radius, mine: mine),
       );
     }
 

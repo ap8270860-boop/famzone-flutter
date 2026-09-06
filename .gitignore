@@ -79,6 +79,9 @@ unlinked_spec.ds
 **/ios/Flutter/Flutter.framework
 **/ios/Flutter/Flutter.podspec
 **/ios/Flutter/Generated.xcconfig
+
+# Holds the Google Maps iOS key. Machine-local, like android/local.properties.
+**/ios/Flutter/Maps.xcconfig
 **/ios/Flutter/ephemeral
 **/ios/Flutter/app.flx
 **/ios/Flutter/app.zip
@@ -118,3 +121,15 @@ app.*.symbols
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
 /_to_delete
+
+# Scratch from AI-assisted edits.
+#
+# One-off patch scripts and the archives used to move files onto this machine.
+# They run once and are then dead weight — but 32 of them reached git before
+# anybody noticed, so they are refused at the door now.
+#
+# Anchored with a leading slash: only the repo root. A legitimate apply_*.py
+# deeper in the tree is still tracked.
+/*.tar.gz
+/apply_*.py
+/fix_*.py
