@@ -43,27 +43,57 @@ class SafetyStatusCard extends StatelessWidget {
                 // repaint the eye misses.
                 AnimatedSwitcher(
                   duration: const Duration(milliseconds: 260),
-                  child: Text(
-                    s.headline,
+                  // Same guard. "All Safe" is comfortable at 23px; "Needs
+                  // Attention" is not, and that is the state you least want
+                  // reflowing the card.
+                  child: FittedBox(
                     key: ValueKey(s.headline),
-                    style: const TextStyle(
-                      fontSize: 23,
-                      fontWeight: FontWeight.w700,
-                      height: 1.1,
-                      color: AppColors.textPrimary,
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      s.headline,
+                      maxLines: 1,
+                      softWrap: false,
+                      style: const TextStyle(
+                        fontSize: 23,
+                        fontWeight: FontWeight.w700,
+                        height: 1.1,
+                        color: AppColors.textPrimary,
+                      ),
                     ),
                   ),
                 ),
                 const SizedBox(height: 7),
                 AnimatedSwitcher(
                   duration: const Duration(milliseconds: 260),
-                  child: Text(
-                    s.detail,
+                  /*
+                   | One line, on every device.
+                   |
+                   | "You checked in at 9:58 PM." fits this column at the
+                   | default text scale and wraps the moment anything eats
+                   | into it — a wider shield, a longer time string, or an
+                   | accessibility font setting. Scaling down is the right
+                   | answer rather than ellipsis: the time is the whole point
+                   | of the sentence and it sits at the end, so truncating
+                   | would cut off the only part worth reading.
+                   |
+                   | The key moves onto the FittedBox because AnimatedSwitcher
+                   | keys off its direct child — left on the Text, a change of
+                   | wording would swap silently instead of animating.
+                   */
+                  child: FittedBox(
                     key: ValueKey(s.detail),
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      height: 1.35,
-                      color: AppColors.textMuted,
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      s.detail,
+                      maxLines: 1,
+                      softWrap: false,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        height: 1.35,
+                        color: AppColors.textMuted,
+                      ),
                     ),
                   ),
                 ),
@@ -206,32 +236,115 @@ class _PulseRing extends StatefulWidget {
 }
 
 class _PulseRingState extends State<_PulseRing>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
+    with TickerProviderStateMixin {
+  /*
+  |----------------------------------------------------------------------------
+  | Two rhythms, not one
+  |----------------------------------------------------------------------------
+  |
+  | The ring breathes slowly; the heart beats quickly. They are deliberately
+  | not synchronised, because a body does not do one thing at one speed — and
+  | a ring that expands in lockstep with every beat reads as a cartoon.
+  |
+  | Kept independent also means the ring can stay calm while the beat races,
+  | which is exactly what happens when the tone turns critical.
+  */
+
+  /// The ring's opacity, in and out.
+  late final AnimationController _ring = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 2600),
+    duration: _ringPeriod,
   )..repeat(reverse: true);
+
+  /// One cardiac cycle.
+  late final AnimationController _beat = AnimationController(
+    vsync: this,
+    duration: _beatPeriod,
+  )..repeat();
+
+  /*
+  |----------------------------------------------------------------------------
+  | Lub-dub
+  |----------------------------------------------------------------------------
+  |
+  | A real heartbeat is two contractions, not one: the ventricles close first
+  | (the loud "lub"), the valves follow a fraction of a second later (the
+  | softer "dub"), and then nothing at all for most of the cycle. The rest is
+  | the important part — it is over half the beat, and leaving it out is what
+  | makes an animated heart look like it is merely throbbing.
+  |
+  | Weights below are roughly milliseconds against a 940 ms cycle, which is
+  | about 64 bpm — a calm resting rate. The second bump is smaller than the
+  | first, and the recovery is slower than either attack, because that is how
+  | the real thing behaves.
+  */
+  static final Animatable<double> _lubDub = TweenSequence<double>([
+    // Lub — fast attack, the biggest movement in the cycle.
+    TweenSequenceItem(
+      tween: Tween(begin: 1.0, end: 1.16)
+          .chain(CurveTween(curve: Curves.easeOutQuad)),
+      weight: 7,
+    ),
+    // Falling back, but not all the way.
+    TweenSequenceItem(
+      tween: Tween(begin: 1.16, end: 1.03)
+          .chain(CurveTween(curve: Curves.easeInQuad)),
+      weight: 9,
+    ),
+    // Dub — smaller, and close behind.
+    TweenSequenceItem(
+      tween: Tween(begin: 1.03, end: 1.11)
+          .chain(CurveTween(curve: Curves.easeOutQuad)),
+      weight: 8,
+    ),
+    // Settling, slower than it rose.
+    TweenSequenceItem(
+      tween: Tween(begin: 1.11, end: 1.0)
+          .chain(CurveTween(curve: Curves.easeInOutQuad)),
+      weight: 14,
+    ),
+    // Rest. Most of the cycle, and the reason it reads as a heart.
+    TweenSequenceItem(tween: ConstantTween(1.0), weight: 56),
+  ]);
+
+  late Animation<double> _scale = _lubDub.animate(_beat);
+
+  Duration get _ringPeriod => widget.tone == SafetyTone.critical
+      ? const Duration(milliseconds: 900)
+      : const Duration(milliseconds: 2600);
+
+  /// 64 bpm at rest, 100 when something is wrong.
+  ///
+  /// The app's own pulse quickening is a quieter way of saying "this is
+  /// serious" than anything that could be written on the card.
+  Duration get _beatPeriod => widget.tone == SafetyTone.critical
+      ? const Duration(milliseconds: 600)
+      : const Duration(milliseconds: 940);
 
   @override
   void didUpdateWidget(_PulseRing old) {
     super.didUpdateWidget(old);
 
-    // An alert should feel urgent, not serene.
-    final wanted = widget.tone == SafetyTone.critical
-        ? const Duration(milliseconds: 900)
-        : const Duration(milliseconds: 2600);
-
-    if (_c.duration != wanted) {
-      _c.duration = wanted;
-      _c
+    if (_ring.duration != _ringPeriod) {
+      _ring.duration = _ringPeriod;
+      _ring
         ..reset()
         ..repeat(reverse: true);
+    }
+
+    if (_beat.duration != _beatPeriod) {
+      _beat.duration = _beatPeriod;
+      _beat
+        ..reset()
+        ..repeat();
     }
   }
 
   @override
   void dispose() {
-    _c.dispose();
+    _ring.dispose();
+    _beat.dispose();
+
     super.dispose();
   }
 
@@ -244,16 +357,52 @@ class _PulseRingState extends State<_PulseRing>
     };
 
     return AnimatedBuilder(
-      animation: _c,
+      animation: Listenable.merge([_ring, _beat]),
       builder: (_, __) {
-        final t = Curves.easeInOut.transform(_c.value);
+        final breath = Curves.easeInOut.transform(_ring.value);
+        final scale = _scale.value;
+
+        // 0 at rest, 1 at the peak of the lub — drives the glow, so the
+        // light behind the heart swells with the beat instead of fading on
+        // a timer of its own.
+        final beat = ((scale - 1.0) / 0.16).clamp(0.0, 1.0);
+
         return SizedBox(
           width: 68,
           height: 68,
           child: CustomPaint(
-            painter: _RingPainter(0.55 + 0.35 * t, widget.accent),
+            painter: _RingPainter(0.55 + 0.35 * breath, widget.accent),
             child: Center(
-              child: Icon(icon, size: 26, color: widget.accent),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  /*
+                   | The glow under the beat.
+                   |
+                   | Barely there at rest and clearly there at the peak. It
+                   | is what stops the scaling reading as a mechanical
+                   | resize: a real beat is felt as much as seen, and light
+                   | is the closest a screen gets to that.
+                   */
+                  Container(
+                    width: 52,
+                    height: 52,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: RadialGradient(
+                        colors: [
+                          widget.accent.withValues(alpha: 0.06 + 0.20 * beat),
+                          widget.accent.withValues(alpha: 0.0),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Transform.scale(
+                    scale: scale,
+                    child: Icon(icon, size: 34, color: widget.accent),
+                  ),
+                ],
+              ),
             ),
           ),
         );

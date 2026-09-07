@@ -235,20 +235,47 @@ class _SosScreenState extends State<SosScreen> {
                     if (_store.services.isEmpty && !_store.loading)
                       const _CatalogueUnavailable()
                     else
-                      GridView.builder(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: 0.92,
+                      /*
+                       | One card holding fourteen rows, not fourteen cards.
+                       |
+                       | A list of separate cards at this length reads as
+                       | fourteen decisions; a single panel with hairline
+                       | dividers reads as one list you scan down. The
+                       | difference matters most to somebody who is not
+                       | reading carefully, which is everybody who opens
+                       | this screen.
+                       */
+                      Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(20),
+                          color: AppColors.glassFill,
+                          border: Border.all(color: AppColors.glassBorder),
                         ),
-                        itemCount: _store.services.length,
-                        itemBuilder: (context, index) => _ServiceCard(
-                          service: _store.services[index],
-                          onTap: () => _open(_store.services[index]),
+                        clipBehavior: Clip.antiAlias,
+                        child: Column(
+                          children: [
+                            for (var i = 0;
+                                i < _store.services.length;
+                                i++) ...[
+                              _ServiceRow(
+                                service: _store.services[i],
+                                onTap: () => _open(_store.services[i]),
+                              ),
+                              if (i != _store.services.length - 1)
+                                const Padding(
+                                  // Inset to the text, not the icon — a
+                                  // divider that starts under the glyph
+                                  // chops the row in half instead of
+                                  // separating it from the next one.
+                                  padding: EdgeInsets.only(left: 74),
+                                  child: Divider(
+                                    height: 1,
+                                    thickness: 1,
+                                    color: AppColors.glassBorder,
+                                  ),
+                                ),
+                            ],
+                          ],
                         ),
                       ),
 
@@ -661,8 +688,18 @@ class _EndOption extends StatelessWidget {
 |------------------------------------------------------------------------------
 */
 
-class _ServiceCard extends StatelessWidget {
-  const _ServiceCard({required this.service, required this.onTap});
+/// One service, as a full-width row.
+///
+/// The shape is lifted from a file list, and it works here for the same
+/// reason it works there: a glyph you recognise on the left, the name in
+/// full, and one line underneath that answers "is this the one I want".
+///
+/// The number lives on that second line rather than in a corner badge,
+/// coloured in the service's own tint. Somebody who already knows they want
+/// 112 can find it without opening anything, and somebody who does not can
+/// read the sentence beside it.
+class _ServiceRow extends StatelessWidget {
+  const _ServiceRow({required this.service, required this.onTap});
 
   final EmergencyService service;
   final VoidCallback onTap;
@@ -672,70 +709,84 @@ class _ServiceCard extends StatelessWidget {
     final number = service.primaryNumber?.number;
 
     return Material(
-      color: AppColors.glassFill,
-      borderRadius: BorderRadius.circular(20),
-      clipBehavior: Clip.antiAlias,
+      color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: service.tint.withValues(alpha: 0.28)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Row(
             children: [
-              // Static in the grid. Fourteen breathing tiles at once would be
-              // a fairground, not an emergency screen.
+              // Static here. Fourteen breathing glyphs in one list would be
+              // a fairground; the detail screen is where one of them earns
+              // the animation.
               ServiceGlyph(
                 icon: service.icon,
                 tint: service.tint,
-                size: 52,
+                size: 46,
                 animate: false,
               ),
-              const Spacer(),
-              Text(
-                service.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: AppColors.textPrimary,
-                  fontSize: 14.5,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                service.tagline,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: AppColors.textMuted,
-                  fontSize: 11.5,
-                  height: 1.35,
-                ),
-              ),
-              if (number != null) ...[
-                const SizedBox(height: 8),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: service.tint.withValues(alpha: 0.16),
-                    borderRadius: BorderRadius.circular(7),
-                  ),
-                  child: Text(
-                    number,
-                    style: TextStyle(
-                      color: service.tint,
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.4,
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      service.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        height: 1.2,
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        if (number != null) ...[
+                          Text(
+                            number,
+                            style: TextStyle(
+                              color: service.tint,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.2,
+                            ),
+                          ),
+                          Text(
+                            '  ·  ',
+                            style: TextStyle(
+                              color: AppColors.textMuted
+                                  .withValues(alpha: 0.6),
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                        Expanded(
+                          child: Text(
+                            service.tagline,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.textMuted,
+                              fontSize: 12.5,
+                              height: 1.3,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
-              ],
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                Icons.chevron_right_rounded,
+                size: 20,
+                color: AppColors.textMuted.withValues(alpha: 0.7),
+              ),
             ],
           ),
         ),
@@ -743,6 +794,8 @@ class _ServiceCard extends StatelessWidget {
     );
   }
 }
+
+
 
 /*
 |------------------------------------------------------------------------------

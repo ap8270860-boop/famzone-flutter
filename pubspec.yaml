@@ -121,6 +121,8 @@ flutter:
     - assets/logo/
     - assets/images/
     - assets/icons/
+    # Not covered by the line above: asset directories are not recursive.
+    - assets/icons/services/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
