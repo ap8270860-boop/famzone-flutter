@@ -91,6 +91,17 @@ dependencies:
   geolocator: ^14.0.2
   google_maps_flutter: ^2.5.0
 
+  # Battery percentage, reported alongside each position.
+  #
+  # A family member's phone at 6% is often the most actionable thing on the
+  # map — it is why they will stop answering in twenty minutes. The column
+  # and the wire format have existed since the first version of location;
+  # this is what finally reads the number.
+  #
+  # No permissions on either platform: the level is public API on Android
+  # and iOS alike.
+  battery_plus: ^6.2.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

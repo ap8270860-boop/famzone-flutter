@@ -47,6 +47,25 @@ class ChatStore extends ChangeNotifier {
   List<Conversation> get requests => _requests;
 
   int get unread => _unread;
+
+  /// Unread messages in my direct thread with one person.
+  ///
+  /// Group threads are skipped: the badge this feeds sits on somebody's face
+  /// on the family map, and "3 unread" there has to mean three messages from
+  /// *them*, not three in a group they happen to be in.
+  ///
+  /// Zero when we have never spoken — an absent thread and an empty one are
+  /// the same answer to this question.
+  int unreadWith(String userId) {
+    for (final thread in _threads) {
+      if (thread.group != null) continue;
+      if (thread.other?.id != userId) continue;
+
+      return thread.unreadCount;
+    }
+
+    return 0;
+  }
   int get requestCount => _requestCount;
   int get archivedCount => _archivedCount;
 
@@ -101,6 +120,27 @@ class ChatStore extends ChangeNotifier {
   }
 
   /// Just the counts, for the badge on a screen that is not the inbox.
+  /// Make sure the thread list is actually in memory.
+  ///
+  /// The bug this fixes: `_threads` was only ever filled by [refresh], and
+  /// [refresh] only ran when somebody tapped the Chats tab. Anyone who opened
+  /// the app and went straight to the family map therefore had an *empty*
+  /// thread list, so [unreadWith] answered zero for every person on it and no
+  /// badge appeared — on some devices and not others, purely according to
+  /// whether that person had visited Chats since launch.
+  ///
+  /// `refreshBadge` was not enough on its own. It fetches the *total* unread
+  /// count for the nav bar, which is one number and says nothing about who
+  /// the messages are from.
+  ///
+  /// Cheap to call: it does nothing once loaded, and the socket keeps the
+  /// list current from then on.
+  Future<void> ensureLoaded() async {
+    if (_loaded || _loading) return;
+
+    await refresh();
+  }
+
   Future<void> refreshBadge() async {
     if (!Session.instance.isAuthenticated) return;
 

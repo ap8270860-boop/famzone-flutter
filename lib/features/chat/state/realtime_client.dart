@@ -293,6 +293,19 @@ class RealtimeClient extends ChangeNotifier {
 
         return;
 
+      case 'place.crossed':
+        /*
+         | Somebody arrived at or left one of my places.
+         |
+         | On the mailbox because a place belongs to me and the crossing is
+         | news about *my* geofence — it has nothing to do with the channel
+         | the person who moved is broadcasting on, and they may not be
+         | broadcasting on one at all.
+         */
+        LocationStore.instance.applyPlaceCrossing(data);
+
+        return;
+
       case 'conversation.closed':
         final id = data['conversation_id'] as String?;
 

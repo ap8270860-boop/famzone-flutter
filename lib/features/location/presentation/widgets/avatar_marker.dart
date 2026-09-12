@@ -5,8 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 
-import '../../../../core/theme/app_colors.dart';
-
 /// People-shaped map markers.
 ///
 /// Google's default pin is a red teardrop, and a map of six identical red
@@ -15,9 +13,13 @@ import '../../../../core/theme/app_colors.dart';
 /// glance without tapping anything, which is the entire difference between a
 /// map you consult and a map you use.
 ///
-/// Everything here is painted once and cached. A marker rebuilt on every
-/// position update would mean decoding a PNG sixty times a second, and the
-/// resulting jank would undo all the interpolation work it sits next to.
+/// The marker is one bitmap — circle, pointer and the little label card under
+/// it are all painted together, because Google Maps has no concept of a
+/// marker with a widget attached. That constraint is what drives the caching
+/// rules below: every distinct appearance is a separate bitmap, so anything
+/// that varies continuously has to be quantised before it reaches the label,
+/// or the map repaints faces at sixty frames a second and every bit of the
+/// interpolation work next door is wasted.
 class AvatarMarker {
   const AvatarMarker._();
 
@@ -32,11 +34,16 @@ class AvatarMarker {
   /// marker is still being painted does not start five more paints.
   static final Map<String, Future<BitmapDescriptor>> _building = {};
 
-  /// The marker's drawn size in logical pixels, before device scaling.
-  static const double _size = 54;
+  /// The face's drawn diameter in logical pixels, before device scaling.
+  static const double _circle = 52;
 
-  /// Room under the circle for the pointer.
-  static const double _tail = 10;
+  /// The pointer below it. Its tip is the marker's actual position.
+  static const double _tail = 9;
+
+  /// Gap between the pointer's tip and the top of the label card.
+  static const double _gap = 5;
+
+  static const double _labelRadius = 8;
 
   /// One person's marker.
   ///
@@ -48,80 +55,245 @@ class AvatarMarker {
     required String userId,
     required String initials,
     String? avatarUrl,
+    String? name,
+    String? caption,
+    Color ring = const Color(0xFF2BE07F),
     bool stale = false,
     bool isMe = false,
+    int unread = 0,
     double pixelRatio = 3.0,
   }) {
-    final key = '$userId|${avatarUrl ?? ''}|$stale|$isMe|$pixelRatio';
+    final key = cacheKey(
+      userId: userId,
+      avatarUrl: avatarUrl,
+      name: name,
+      caption: caption,
+      ring: ring,
+      stale: stale,
+      isMe: isMe,
+      unread: unread,
+      pixelRatio: pixelRatio,
+    );
 
     final cached = _cache[key];
 
     if (cached != null) return Future.value(cached);
 
+    // isMe is part of the key but not of the painting: the ring colour
+    // arrives already decided, because which green means "me" is a property
+    // of the map's palette rather than of the marker.
     return _building[key] ??= _build(
       key: key,
       initials: initials,
       avatarUrl: avatarUrl,
+      name: name,
+      caption: caption,
+      ring: ring,
       stale: stale,
-      isMe: isMe,
+      unread: unread,
       pixelRatio: pixelRatio,
     ).whenComplete(() => _building.remove(key));
   }
+
+  /// The key a given appearance will be cached under.
+  ///
+  /// Public because the map screen needs to ask "is this marker already
+  /// painted" synchronously, while building its marker set inside a frame.
+  /// Awaiting [forPerson] there would mean a frame with no markers on it.
+  static String cacheKey({
+    required String userId,
+    String? avatarUrl,
+    String? name,
+    String? caption,
+    Color ring = const Color(0xFF2BE07F),
+    bool stale = false,
+    bool isMe = false,
+    int unread = 0,
+    double pixelRatio = 3.0,
+  }) =>
+      '$userId|${avatarUrl ?? ''}|${name ?? ''}|${caption ?? ''}'
+      '|${ring.toARGB32()}|$stale|$isMe|$unread|$pixelRatio';
+
+  static BitmapDescriptor? cached(String key) => _cache[key];
+
+  /// Where the marker's point sits inside its own bitmap.
+  ///
+  /// Not `(0.5, 1.0)`. That is right for a bare pin, but this bitmap carries
+  /// a label card *below* the pointer, so anchoring at the bottom would hang
+  /// everybody a label's height north of where they actually are — a
+  /// twenty-metre error at street zoom, which on a safety app is the
+  /// difference between "outside the school" and "inside it".
+  static Offset anchorFor({bool labelled = true}) {
+    if (!labelled) return const Offset(0.5, 1.0);
+
+    final total = _circle + _tail + _gap + _labelHeight;
+
+    return Offset(0.5, (_circle + _tail) / total);
+  }
+
+  static const double _labelHeight = 38;
+
+  /*
+  |----------------------------------------------------------------------------
+  | Distance, quantised
+  |----------------------------------------------------------------------------
+  */
+
+  /// A distance rounded hard enough that the label stops changing.
+  ///
+  /// Raw metres would give a new string — and therefore a fresh bitmap
+  /// decode — on every single fix. Bucketing to 50 m under a kilometre and
+  /// 100 m over it means a walking family member repaints their own marker
+  /// about once a minute, and nobody can tell the label is approximate
+  /// because at these distances it always was.
+  static String? distanceLabel(double? metres) {
+    if (metres == null) return null;
+
+    if (metres < 1000) {
+      final rounded = (metres / 50).round() * 50;
+
+      return rounded <= 0 ? 'Here' : '$rounded m';
+    }
+
+    final km = (metres / 100).round() / 10;
+
+    if (km >= 100) return '${km.round()} km';
+
+    return '${km.toStringAsFixed(1)} km';
+  }
+
+  /*
+  |----------------------------------------------------------------------------
+  | Painting
+  |----------------------------------------------------------------------------
+  */
 
   static Future<BitmapDescriptor> _build({
     required String key,
     required String initials,
     required String? avatarUrl,
+    required String? name,
+    required String? caption,
+    required Color ring,
     required bool stale,
-    required bool isMe,
+    required int unread,
     required double pixelRatio,
   }) async {
     final photo = await _photo(avatarUrl);
 
+    final scale = pixelRatio;
+    final labelled = name != null && name.isNotEmpty;
+
+    final accent = stale ? const Color(0xFF9AA5B5) : ring;
+
+    // --- measure the label first, because it decides the bitmap's width ----
+
+    final title = labelled
+        ? (TextPainter(
+            text: TextSpan(
+              text: name,
+              style: TextStyle(
+                color: const Color(0xFF1B2430),
+                fontSize: 12 * scale,
+                fontWeight: FontWeight.w700,
+                height: 1.1,
+              ),
+            ),
+            textDirection: TextDirection.ltr,
+            maxLines: 1,
+            ellipsis: '…',
+          )..layout(maxWidth: 128 * scale))
+        : null;
+
+    final sub = (labelled && caption != null && caption.isNotEmpty)
+        ? (TextPainter(
+            text: TextSpan(
+              text: caption,
+              style: TextStyle(
+                color: const Color(0xFF69748A),
+                fontSize: 10.5 * scale,
+                fontWeight: FontWeight.w600,
+                height: 1.1,
+              ),
+            ),
+            textDirection: TextDirection.ltr,
+            maxLines: 1,
+            ellipsis: '…',
+          )..layout(maxWidth: 128 * scale))
+        : null;
+
+    const labelPadX = 9.0;
+
+    final labelWidth = title == null
+        ? 0.0
+        : math.max(title.width, sub?.width ?? 0) + labelPadX * 2 * scale;
+
+    final circle = _circle * scale;
+    final width = math.max(circle, labelWidth);
+    final height =
+        (labelled ? _circle + _tail + _gap + _labelHeight : _circle + _tail) *
+            scale;
+
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
 
-    final scale = pixelRatio;
-    final width = _size * scale;
-    final height = (_size + _tail) * scale;
-    final radius = width / 2;
-    final centre = Offset(radius, radius);
+    final radius = circle / 2;
+    final centre = Offset(width / 2, radius);
+    final tipY = (_circle + _tail) * scale;
 
-    // --- the shadow, so a pin over pale water still reads ------------------
+    // --- shadow, so a marker over pale road or water still reads -----------
 
     canvas.drawCircle(
-      centre.translate(0, 2 * scale),
-      radius - 1 * scale,
+      centre.translate(0, 2.5 * scale),
+      radius - scale,
       Paint()
-        ..color = Colors.black.withValues(alpha: 0.45)
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 4 * scale),
+        ..color = const Color(0xFF0E1B2A).withValues(alpha: 0.30)
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 5 * scale),
     );
 
     // --- the pointer ------------------------------------------------------
+    //
+    // Painted before the circle so the joint is hidden behind it. Drawn in
+    // the ring colour rather than white, because on a light map a white
+    // pointer on a white road disappears and the marker appears to float.
 
-    final tailPaint = Paint()
-      ..shader = _ring(isMe, stale).createShader(
-        Rect.fromCircle(center: centre, radius: radius),
-      );
-
-    final tail = Path()
-      ..moveTo(radius - 7 * scale, height - _tail * scale - 2 * scale)
-      ..lineTo(radius, height - 1 * scale)
-      ..lineTo(radius + 7 * scale, height - _tail * scale - 2 * scale)
+    final pointer = Path()
+      ..moveTo(centre.dx - 7 * scale, radius + circle * 0.30)
+      ..lineTo(centre.dx, tipY)
+      ..lineTo(centre.dx + 7 * scale, radius + circle * 0.30)
       ..close();
 
-    canvas.drawPath(tail, tailPaint);
+    canvas.drawPath(
+      pointer,
+      Paint()
+        ..color = const Color(0xFF0E1B2A).withValues(alpha: 0.22)
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 3 * scale),
+    );
+
+    canvas.drawPath(pointer, Paint()..color = accent);
 
     // --- the ring ---------------------------------------------------------
+    //
+    // Two rings, not one: a white collar inside the coloured edge. On a
+    // light map a coloured ring sitting straight against a photograph reads
+    // as a coloured halo around a face; the white gap is what makes it read
+    // as a *badge*, which is the same trick every map app uses.
 
-    canvas.drawCircle(centre, radius - 1 * scale, tailPaint);
+    canvas.drawCircle(centre, radius - scale, Paint()..color = accent);
+    canvas.drawCircle(
+      centre,
+      radius - 3.5 * scale,
+      Paint()..color = Colors.white,
+    );
 
     // --- the face ---------------------------------------------------------
 
-    final inner = radius - 4.5 * scale;
+    final inner = radius - 5.5 * scale;
 
     canvas.save();
-    canvas.clipPath(Path()..addOval(Rect.fromCircle(center: centre, radius: inner)));
+    canvas.clipPath(
+      Path()..addOval(Rect.fromCircle(center: centre, radius: inner)),
+    );
 
     if (photo != null) {
       // Cover, not fit: a portrait avatar letterboxed inside a circle looks
@@ -141,11 +313,7 @@ class AvatarMarker {
         Paint()..filterQuality = FilterQuality.high,
       );
     } else {
-      canvas.drawCircle(
-        centre,
-        inner,
-        Paint()..color = AppColors.royalNavy,
-      );
+      canvas.drawCircle(centre, inner, Paint()..color = accent);
 
       final label = TextPainter(
         text: TextSpan(
@@ -160,10 +328,7 @@ class AvatarMarker {
         textDirection: TextDirection.ltr,
       )..layout();
 
-      label.paint(
-        canvas,
-        centre - Offset(label.width / 2, label.height / 2),
-      );
+      label.paint(canvas, centre - Offset(label.width / 2, label.height / 2));
     }
 
     if (stale) {
@@ -173,11 +338,109 @@ class AvatarMarker {
       canvas.drawCircle(
         centre,
         inner,
-        Paint()..color = AppColors.deepNavy.withValues(alpha: 0.55),
+        Paint()..color = const Color(0xFFE8ECF2).withValues(alpha: 0.62),
       );
     }
 
     canvas.restore();
+
+    /*
+     | The unread badge, over the ring's top-right.
+     |
+     | Static, unlike the one on the member card below the map, and that is a
+     | constraint rather than a choice: a Google Maps marker is a bitmap, so
+     | animating it would mean pushing a new PNG across the platform channel
+     | every frame. The card animates; the marker states.
+     |
+     | Part of the cache key, so a message arriving repaints this face once.
+     | That is fine at the rate messages actually arrive, and it is exactly
+     | why the *distance* in the label is bucketed to 50 m — the two together
+     | must not turn into a repaint per fix.
+     */
+    if (unread > 0) {
+      final label = unread > 9 ? '9+' : '$unread';
+
+      final text = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 10 * scale,
+            fontWeight: FontWeight.w800,
+            height: 1.0,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+
+      final badgeRadius = math.max(8.0 * scale, text.width / 2 + 4.5 * scale);
+
+      // Pushed onto the ring rather than outside the bitmap: the marker's
+      // width is already decided by the label card, and growing it here
+      // would shift the anchor and move everybody sideways.
+      final badgeCentre = Offset(
+        centre.dx + radius * 0.72,
+        centre.dy - radius * 0.72,
+      );
+
+      canvas.drawCircle(
+        badgeCentre,
+        badgeRadius + 2 * scale,
+        Paint()..color = Colors.white,
+      );
+
+      canvas.drawCircle(
+        badgeCentre,
+        badgeRadius,
+        Paint()..color = const Color(0xFFE5484D),
+      );
+
+      text.paint(
+        canvas,
+        badgeCentre - Offset(text.width / 2, text.height / 2),
+      );
+    }
+
+    // --- the label card ---------------------------------------------------
+
+    if (title != null) {
+      final top = tipY + _gap * scale;
+
+      final card = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          (width - labelWidth) / 2,
+          top,
+          labelWidth,
+          _labelHeight * scale,
+        ),
+        Radius.circular(_labelRadius * scale),
+      );
+
+      canvas.drawRRect(
+        card.shift(Offset(0, 1.5 * scale)),
+        Paint()
+          ..color = const Color(0xFF0E1B2A).withValues(alpha: 0.22)
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, 4 * scale),
+      );
+
+      canvas.drawRRect(card, Paint()..color = Colors.white);
+
+      final textTop = sub == null
+          ? top + (_labelHeight * scale - title.height) / 2
+          : top +
+              (_labelHeight * scale - title.height - sub.height - 2 * scale) /
+                  2;
+
+      title.paint(canvas, Offset((width - title.width) / 2, textTop));
+
+      sub?.paint(
+        canvas,
+        Offset(
+          (width - sub.width) / 2,
+          textTop + title.height + 2 * scale,
+        ),
+      );
+    }
 
     final image = await recorder.endRecording().toImage(
           width.ceil(),
@@ -196,25 +459,6 @@ class AvatarMarker {
     return descriptor;
   }
 
-  /// The ring colour, which is also the marker's whole visual language.
-  ///
-  /// Brand gradient for me, mint for a live family member, muted grey once a
-  /// position has gone stale. Three states, distinguishable without reading
-  /// anything — which is what a map is for.
-  static LinearGradient _ring(bool isMe, bool stale) {
-    if (stale) {
-      return const LinearGradient(
-        colors: [Color(0xFF4A5570), Color(0xFF39415A)],
-      );
-    }
-
-    if (isMe) return AppColors.brandGradient;
-
-    return const LinearGradient(
-      colors: [AppColors.mint, AppColors.aqua],
-    );
-  }
-
   /*
   |----------------------------------------------------------------------------
   | Photos
@@ -227,9 +471,8 @@ class AvatarMarker {
     if (_photos.containsKey(url)) return _photos[url];
 
     try {
-      final response = await http
-          .get(Uri.parse(url))
-          .timeout(const Duration(seconds: 8));
+      final response =
+          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
 
       if (response.statusCode != 200) return _photos[url] = null;
 
@@ -256,5 +499,6 @@ class AvatarMarker {
   static void clear() {
     _cache.clear();
     _photos.clear();
+    _building.clear();
   }
 }

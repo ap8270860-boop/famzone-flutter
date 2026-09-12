@@ -60,6 +60,65 @@ class LocationApi {
         'longitude': longitude,
       });
 
+  /*
+  |----------------------------------------------------------------------------
+  | Family places
+  |----------------------------------------------------------------------------
+  */
+
+  /// My own places.
+  ///
+  /// The map does not need this — `live()` already carries them, so the
+  /// circles draw on the first paint rather than on a second round trip.
+  /// This is for the manage screen, which can be opened without the map
+  /// having loaded.
+  Future<ApiResponse> places() => _api.get('location/places');
+
+  Future<ApiResponse> createPlace(Map<String, dynamic> body) =>
+      _api.post('location/places', body: body);
+
+  Future<ApiResponse> updatePlace(String id, Map<String, dynamic> body) =>
+      _api.patch('location/places/$id', body: body);
+
+  Future<ApiResponse> deletePlace(String id) =>
+      _api.delete('location/places/$id');
+
+  /*
+  |----------------------------------------------------------------------------
+  | History
+  |----------------------------------------------------------------------------
+  */
+
+  /// One person's day, as stays and journeys.
+  ///
+  /// The offset is minutes east of UTC, taken from this phone rather than
+  /// from the account's stored timezone. The question being asked is "what
+  /// did Tuesday look like", and Tuesday means the one wherever the reader is
+  /// standing right now.
+  Future<ApiResponse> history(String userId, DateTime day) {
+    final offset = DateTime.now().timeZoneOffset.inMinutes;
+
+    return _api.get(
+      'location/$userId/history?date=${_dateKey(day)}&offset=$offset',
+    );
+  }
+
+  /// Which days of a month have anything recorded, for the calendar.
+  Future<ApiResponse> historyDays(String userId, DateTime month) {
+    final offset = DateTime.now().timeZoneOffset.inMinutes;
+    final key = '${month.year.toString().padLeft(4, '0')}-'
+        '${month.month.toString().padLeft(2, '0')}';
+
+    return _api.get(
+      'location/$userId/history/days?month=$key&offset=$offset',
+    );
+  }
+
+  static String _dateKey(DateTime day) =>
+      '${day.year.toString().padLeft(4, '0')}-'
+      '${day.month.toString().padLeft(2, '0')}-'
+      '${day.day.toString().padLeft(2, '0')}';
+
   /// The recent path behind somebody's marker.
   Future<ApiResponse> trail(String userId, {DateTime? since}) => _api.get(
         'location/$userId/trail'

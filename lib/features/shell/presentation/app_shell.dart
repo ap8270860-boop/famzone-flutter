@@ -9,6 +9,7 @@ import '../../chat/presentation/inbox_screen.dart';
 import '../../chat/state/chat_store.dart';
 import '../../chat/state/realtime_client.dart';
 import '../../home/presentation/home_screen.dart';
+import '../../location/presentation/widgets/sharing_banner.dart';
 import '../../sos/presentation/sos_screen.dart';
 import '../../sos/presentation/widgets/incoming_sos_banner.dart';
 import '../../sos/state/sos_store.dart';
@@ -55,6 +56,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // the only way to find out you have unread messages is to go looking for
     // them, which rather defeats the point of a badge.
     ChatStore.instance.refreshBadge();
+
+    // The badge is one number; the map needs to know *who* the messages are
+    // from. Loading the threads once at start is what makes the per-person
+    // badges correct before anybody opens Chats.
+    ChatStore.instance.ensureLoaded();
 
     /*
      | Fetch the emergency catalogue up front, quietly.
@@ -141,6 +147,21 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               left: 0,
               right: 0,
               child: IncomingSosBanner(),
+            ),
+
+            /*
+             | And under it, the quieter one.
+             |
+             | Below the SOS banner in the stack on purpose: if both ever fire
+             | at once, the alarm is the one that must be on top. In practice
+             | they rarely coincide, and when they do, an SOS covering a
+             | "started sharing" notice is exactly the right outcome.
+             */
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SharingBanner(),
             ),
           ],
         ),

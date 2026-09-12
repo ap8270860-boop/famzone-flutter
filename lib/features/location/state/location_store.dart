@@ -4,8 +4,10 @@ import 'package:flutter/scheduler.dart';
 
 import '../../../core/session/session.dart';
 import '../../chat/state/realtime_client.dart';
+import '../data/family_models.dart';
 import '../data/location_api.dart';
 import '../data/location_models.dart';
+import '../data/place_models.dart';
 import 'location_tracker.dart';
 
 /// Everybody's positions, and my own sharing state.
@@ -32,6 +34,34 @@ class LocationStore extends ChangeNotifier {
   final Map<String, LivePerson> _people = {};
   final Set<String> _subscribed = {};
 
+  /*
+   | Two collections, and the difference matters.
+   |
+   | `_people` is who the map can draw — everybody with a live share pointed
+   | at me. `_family` is who is in my family, sharing or not, which is the
+   | larger set and the one the status card counts. Folding them into one
+   | would mean either dropping non-sharers off the card or inventing
+   | positions for them, and both are wrong.
+   */
+  List<FamilyMemberLive> _family = const [];
+  FamilyStatus _status = const FamilyStatus.empty();
+
+  /// My own places. Everybody's labels are computed against these on the
+  /// server; here they are what the map draws as circles.
+  List<FamilyPlace> _places = const [];
+
+  /// Somebody just started sharing with me, for the banner.
+  ///
+  /// Held here rather than raised through a navigator: the announcement has
+  /// to reach whoever is looking at whatever screen, and a route pushed from
+  /// a socket handler would land on top of whatever they were doing.
+  SharingNotice? _sharing;
+
+  /// The last arrival or departure, for the banner. Cleared when dismissed
+  /// or superseded — this is a notification, not a log, and Phase C's history
+  /// screen is where a log belongs.
+  PlaceCrossing? _crossing;
+
   List<LocationShare> _myShares = const [];
 
   bool _loading = false;
@@ -48,6 +78,54 @@ class LocationStore extends ChangeNotifier {
             .compareTo(b.position.ageSeconds ?? 1 << 30));
 
     return list;
+  }
+
+  /// Everybody in my family, sharing or not. Sharers first, then whoever was
+  /// seen most recently — so the people you can actually act on are at the
+  /// front of the strip rather than wherever the database happened to put
+  /// them.
+  List<FamilyMemberLive> get family {
+    final list = [..._family];
+
+    list.sort((a, b) {
+      if (a.sharing != b.sharing) return a.sharing ? -1 : 1;
+
+      return (a.presence.ageSeconds ?? 1 << 30)
+          .compareTo(b.presence.ageSeconds ?? 1 << 30);
+    });
+
+    return list;
+  }
+
+  FamilyStatus get status => _status;
+
+  List<FamilyPlace> get places => _places;
+
+  PlaceCrossing? get crossing => _crossing;
+
+  SharingNotice? get sharingNotice => _sharing;
+
+  void dismissSharingNotice() {
+    if (_sharing == null) return;
+
+    _sharing = null;
+    _notify();
+  }
+
+  FamilyPlace? place(String id) {
+    for (final place in _places) {
+      if (place.id == id) return place;
+    }
+
+    return null;
+  }
+
+  FamilyMemberLive? familyMember(String userId) {
+    for (final member in _family) {
+      if (member.user.id == userId) return member;
+    }
+
+    return null;
   }
 
   List<LocationShare> get myShares => _myShares;
@@ -125,6 +203,22 @@ class LocationStore extends ChangeNotifier {
               .map(LivePerson.fromJson)
               .map((person) => MapEntry(person.user.id, person)),
         );
+
+      _family = ((data['family'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(FamilyMemberLive.fromJson)
+          .toList();
+
+      _places = ((data['places'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(FamilyPlace.fromJson)
+          .toList();
+
+      final status = data['status'];
+
+      _status = status is Map<String, dynamic>
+          ? FamilyStatus.fromJson(status)
+          : const FamilyStatus.empty();
 
       final me = data['me'] as Map<String, dynamic>? ?? const {};
 
@@ -272,6 +366,30 @@ class LocationStore extends ChangeNotifier {
 
     _people[position.userId] = existing.withPosition(position);
 
+    /*
+     | The same fix, folded into the roster.
+     |
+     | Without this the map marker glides and the card under it keeps showing
+     | the speed from the cold load, which is the kind of inconsistency people
+     | notice immediately and cannot explain — two numbers for one person on
+     | one screen. One frame, both collections.
+     */
+    _family = [
+      for (final member in _family)
+        if (member.user.id == position.userId)
+          FamilyMemberLive(
+            user: member.user,
+            sharing: true,
+            presence: member.presence,
+            movement: position.isStale
+                ? 'stale'
+                : (position.moving ? 'travelling' : 'stationary'),
+            position: position,
+          )
+        else
+          member,
+    ];
+
     _notify();
   }
 
@@ -297,10 +415,35 @@ class LocationStore extends ChangeNotifier {
     }
 
     /*
-     | The event carries a position but not a name, so a person we have never
-     | seen needs a round trip. That is one request per new sharer, which is
-     | rare — and the alternative, a pin labelled with a uuid, is not an
-     | alternative.
+     | The banner goes up now, on the frame, not after the round trip below.
+     |
+     | The event carries the sharer's name and avatar precisely so this can
+     | happen — an announcement that waits on a network call before it can
+     | say who it is about would be a banner reading "somebody started
+     | sharing" for as long as the request takes.
+     */
+    final person = data['user'];
+
+    if (person is Map<String, dynamic>) {
+      final position = data['position'];
+
+      _sharing = SharingNotice(
+        userId: parsed.userId,
+        name: person['name'] as String? ?? 'A family member',
+        avatarUrl: person['avatar_url'] as String?,
+        at: DateTime.now(),
+        hasFix: position is Map<String, dynamic> &&
+            (position['has_fix'] as bool? ?? position['latitude'] != null),
+      );
+
+      _notify();
+    }
+
+    /*
+     | A person we have never seen still needs a round trip — the banner only
+     | needs a name, but the map needs a full profile. That is one request per
+     | new sharer, which is rare, and the alternative is a pin labelled with a
+     | uuid.
      */
     final existing = _people[parsed.userId];
 
@@ -345,8 +488,121 @@ class LocationStore extends ChangeNotifier {
 
     _people.remove(parsed.userId);
 
+    // They stay in the family, they just stop having a position. Leaving the
+    // last one behind would put a pin on the map that nobody has permission
+    // to see any more, quietly ageing.
+    _family = [
+      for (final member in _family)
+        if (member.user.id == parsed.userId)
+          FamilyMemberLive(
+            user: member.user,
+            sharing: false,
+            presence: member.presence,
+            movement: 'unknown',
+          )
+        else
+          member,
+    ];
+
     await _reconcileSubscriptions();
 
+    _notify();
+  }
+
+  /*
+  |----------------------------------------------------------------------------
+  | Places
+  |----------------------------------------------------------------------------
+  */
+
+  /// Create or update a place, and refresh everything it touches.
+  ///
+  /// A full [load] after the write rather than folding the response in
+  /// locally. It looks wasteful and it is the right call: moving a circle
+  /// changes who is inside it, which changes every member's label *and* the
+  /// status card's buckets — all of which the server recomputes and none of
+  /// which this client can derive. Patching the list locally would leave a
+  /// map that is right about the circle and wrong about the people in it.
+  Future<bool> savePlace(FamilyPlace place) async {
+    final response = place.id.isEmpty
+        ? await _api.createPlace(place.toJson())
+        : await _api.updatePlace(place.id, place.toJson());
+
+    if (!response.success) {
+      _error = response.message;
+      _notify();
+
+      return false;
+    }
+
+    await load();
+
+    return true;
+  }
+
+  Future<bool> deletePlace(String id) async {
+    final response = await _api.deletePlace(id);
+
+    if (!response.success) {
+      _error = response.message;
+      _notify();
+
+      return false;
+    }
+
+    await load();
+
+    return true;
+  }
+
+  /// Somebody arrived at or left one of my places.
+  ///
+  /// Routed from the mailbox channel. The payload carries a finished
+  /// sentence, so nothing here assembles one — see [PlaceCrossing].
+  void applyPlaceCrossing(Map<String, dynamic> data) {
+    _crossing = PlaceCrossing.fromJson(data);
+
+    /*
+     | The label under their name changes too, and it changes now.
+     |
+     | Waiting for the next map refresh would leave a banner saying "Aarav
+     | arrived at School" above a card that still says "Travelling", for up
+     | to a minute. Two statements about one person, disagreeing, on one
+     | screen — which reads as a bug even though both were true when written.
+     |
+     | A full reload would also fix it and would cost a round trip on every
+     | arrival. This is the same information, applied locally.
+     */
+    final crossing = _crossing!;
+
+    _family = [
+      for (final member in _family)
+        if (member.user.id == crossing.personId)
+          FamilyMemberLive(
+            user: member.user,
+            sharing: member.sharing,
+            presence: member.presence,
+            movement: crossing.isArrival ? crossing.placeKind : 'stationary',
+            position: member.position,
+            place: crossing.isArrival
+                ? PlaceRef(
+                    id: '',
+                    name: crossing.placeName,
+                    kind: crossing.placeKind,
+                  )
+                : null,
+          )
+        else
+          member,
+    ];
+
+    _notify();
+  }
+
+  void dismissCrossing() {
+    if (_crossing == null) return;
+
+    _crossing = null;
     _notify();
   }
 
@@ -377,6 +633,11 @@ class LocationStore extends ChangeNotifier {
 
     _subscribed.clear();
     _people.clear();
+    _places = const [];
+    _crossing = null;
+    _sharing = null;
+    _family = const [];
+    _status = const FamilyStatus.empty();
     _myShares = const [];
     _loaded = false;
     _error = null;

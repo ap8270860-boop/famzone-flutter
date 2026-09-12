@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
+import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
@@ -171,6 +173,12 @@ class LocationTracker extends ChangeNotifier {
 
     _plan = const TrackingPlan.idle();
 
+    // Forget the anchor too. A stream restarted an hour later would
+    // otherwise measure its first displacement against wherever the phone
+    // was when sharing stopped.
+    _anchor = null;
+    _moving = false;
+
     // Anything already measured is still worth sending — the last fix before
     // somebody taps "stop sharing" is the most interesting one in the buffer.
     await flush();
@@ -263,7 +271,139 @@ class LocationTracker extends ChangeNotifier {
   |----------------------------------------------------------------------------
   */
 
+  /*
+  |----------------------------------------------------------------------------
+  | Battery
+  |----------------------------------------------------------------------------
+  |
+  | A family member's battery percentage is one of the more useful things on
+  | this map and one of the cheapest to send: the column, the wire format and
+  | the presenter have all existed since the first version. Nothing was ever
+  | reading the battery, so it arrived null every time — the whole feature was
+  | a missing four-line sampler.
+  |
+  | Cached rather than read per fix. A reading is a platform channel call, a
+  | phone at 5 s intervals would make twelve a minute, and the answer changes
+  | perhaps once every few minutes. Ninety seconds is far finer than the
+  | quantity it measures.
+  */
+
+  static const Duration _batteryEvery = Duration(seconds: 90);
+
+  final Battery _battery = Battery();
+
+  int? _batteryLevel;
+  DateTime? _batteryAt;
+
+  /// Kick off a refresh if the cached reading is old. Never awaited — a fix
+  /// must not wait on a battery reading, and the value it misses will be on
+  /// the next one a few seconds later.
+  void _refreshBattery() {
+    final at = _batteryAt;
+
+    if (at != null && DateTime.now().difference(at) < _batteryEvery) return;
+
+    // Stamped before the await, not after, so a platform that never answers
+    // cannot make this retry on every single fix.
+    _batteryAt = DateTime.now();
+
+    _battery.batteryLevel.then((level) {
+      if (level >= 0 && level <= 100) _batteryLevel = level;
+    }).catchError((_) {
+      // An emulator or a desktop without a battery. Null is a perfectly good
+      // answer and the UI already draws a dash for it.
+      return 0;
+    });
+  }
+
+  /*
+  |----------------------------------------------------------------------------
+  | Am I moving?
+  |----------------------------------------------------------------------------
+  |
+  | Not `position.speed > 1.0`, which is what this used to be and what made
+  | walking family members show as stationary on everybody else's map.
+  |
+  | The speed field is the least trustworthy thing in a fix. Android's fused
+  | provider derives it from Doppler shift and reports a flat 0.0 whenever the
+  | lock is not good enough — which, for somebody walking between buildings,
+  | is most of the time. iOS reports -1 for "unknown", which this class
+  | already turns into null. On both, a pedestrian frequently looks stopped.
+  |
+  | That mattered far more than it sounds, because the server sets the
+  | sampling cadence from this flag: reported stationary meant a 60 m distance
+  | filter, which on Android suppresses updates until the phone has moved 60 m
+  | — about forty-three seconds of walking. So the flag starved the very
+  | stream of fixes that could have corrected it.
+  |
+  | Displacement needs no cooperation from the sensor. The server does the
+  | same arithmetic authoritatively on every accepted fix; this is the local
+  | copy, so the phone's own dot and its first ping are right too.
+  */
+
+  /// The fix the current verdict is measured against, and when it was taken.
+  ///
+  /// An *anchor*, not the previous fix. Consecutive fixes arrive five seconds
+  /// apart, and over five seconds nothing can be told apart from noise. Over
+  /// twenty, a walk at a constant pace separates cleanly: GPS error is
+  /// mean-reverting rather than diffusive, so noise-implied speed decays as
+  /// 1/t while real speed does not.
+  Position? _anchor;
+
+  bool _moving = false;
+
+  static const double _movingSpeedMs = 0.7; // 2.5 km/h
+  static const double _movingMinMetres = 10.0;
+  static const double _movingAccuracyFactor = 2.0;
+  static const double _movingMaxAccuracy = 40.0;
+  static const double _movingBaselineS = 20.0;
+
+  bool _isMoving(Position position) {
+    final anchor = _anchor;
+
+    if (anchor == null) {
+      _anchor = position;
+
+      // Nothing to measure against yet, so the sensor is all there is — and
+      // it is only the first fix of a session.
+      _moving = position.speed > _movingSpeedMs;
+
+      return _moving;
+    }
+
+    // A fix worse than this votes on nothing. Guessing from a reading you do
+    // not trust is how a stationary phone talks itself into the five-second
+    // plan and flattens a battery.
+    if (position.accuracy > _movingMaxAccuracy) return _moving;
+
+    final seconds =
+        position.timestamp.difference(anchor.timestamp).inMilliseconds / 1000.0;
+
+    if (seconds < _movingBaselineS) return _moving;
+
+    final metres = Geolocator.distanceBetween(
+      anchor.latitude,
+      anchor.longitude,
+      position.latitude,
+      position.longitude,
+    );
+
+    final needed = math.max(
+      _movingMinMetres,
+      _movingAccuracyFactor * position.accuracy,
+    );
+
+    _moving = metres >= needed && metres / seconds >= _movingSpeedMs;
+    _anchor = position;
+
+    return _moving;
+  }
+
   void _onFix(Position position) {
+    _refreshBattery();
+
+    final moving = _isMoving(position);
+
     final fix = LocationFix(
       latitude: position.latitude,
       longitude: position.longitude,
@@ -281,12 +421,14 @@ class LocationTracker extends ChangeNotifier {
           : null,
 
       /*
-       | "Moving" is decided here, from speed, rather than taken from an
-       | activity recogniser. One dependency fewer, and the only thing the
-       | server does with it is choose a sampling rate — so being wrong for a
-       | few seconds at the start of a journey costs one extra fix.
+       | From displacement, not from the speed sensor. See [_isMoving].
+       |
+       | The server recomputes this from the same two positions and its answer
+       | is the one that counts — this copy exists so the local dot and the
+       | very first ping of a session are right before any round trip.
        */
-      moving: position.speed > 1.0,
+      moving: moving,
+      batteryLevel: _batteryLevel,
     );
 
     _buffer.add(fix);
@@ -305,6 +447,7 @@ class LocationTracker extends ChangeNotifier {
       speed: fix.speed,
       heading: fix.heading,
       moving: fix.moving,
+      batteryLevel: fix.batteryLevel,
       recordedAt: fix.recordedAt,
       ageSeconds: 0,
     );
@@ -375,6 +518,8 @@ class LocationTracker extends ChangeNotifier {
   Future<LocationFix?> currentFix({
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    _refreshBattery();
+
     Position? position;
 
     try {
@@ -399,7 +544,12 @@ class LocationTracker extends ChangeNotifier {
       accuracy: position.accuracy,
       speed: position.speed < 0 ? null : position.speed,
       heading: position.heading >= 0 ? position.heading : null,
-      moving: position.speed > 1.0,
+
+      // A one-off fix has nothing to compare against, so the sensor is all
+      // there is. It is only the opening fix of a share; the stream corrects
+      // it within seconds.
+      moving: position.speed > _movingSpeedMs,
+      batteryLevel: _batteryLevel,
     );
   }
 }
