@@ -156,22 +156,6 @@ class _PlaceEditorSheetState extends State<PlaceEditorSheet> {
                         ),
                       ),
                       const Spacer(),
-                      if (widget.onDelete != null)
-                        IconButton(
-                          onPressed: _saving
-                              ? null
-                              : () async {
-                                  await widget.onDelete!();
-
-                                  if (context.mounted) {
-                                    Navigator.of(context).pop();
-                                  }
-                                },
-                          icon: const Icon(Icons.delete_outline_rounded,
-                              size: 20),
-                          color: const Color(0xFFE5484D),
-                          tooltip: 'Delete',
-                        ),
                     ],
                   ),
                 ),
@@ -315,7 +299,7 @@ class _PlaceEditorSheetState extends State<PlaceEditorSheet> {
 
                 const SizedBox(height: 16),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+                  padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
                   child: SizedBox(
                     width: double.infinity,
                     height: 50,
@@ -346,6 +330,45 @@ class _PlaceEditorSheetState extends State<PlaceEditorSheet> {
                     ),
                   ),
                 ),
+
+                /*
+                 | Removing a place is a full-width button, not an icon.
+                 |
+                 | It was a small bin in the corner of the header, which reads
+                 | as decoration and sits where nobody looks for a destructive
+                 | action. Deleting is one of only two things anybody comes to
+                 | this sheet to do, so it gets the same weight as the other.
+                 |
+                 | Under the save button rather than beside it: they are not
+                 | equals, and a destructive action next to a primary one is
+                 | how people delete something they meant to keep. The
+                 | confirmation that follows names the place.
+                 */
+                if (widget.onDelete != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+                    child: TextButton.icon(
+                      onPressed: _saving
+                          ? null
+                          : () async {
+                              await widget.onDelete!();
+
+                              // The caller confirms and may well be declined,
+                              // so closing is its job, not this button's.
+                            },
+                      icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                      label: Text('Remove ${_name.text.trim().isEmpty ? 'this place' : _name.text.trim()}'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: const Color(0xFFE5484D),
+                        minimumSize: const Size(double.infinity, 46),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                const SizedBox(height: 10),
               ],
             ),
           ),

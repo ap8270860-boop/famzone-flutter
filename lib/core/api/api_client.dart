@@ -57,6 +57,26 @@ class ApiClient {
     );
   }
 
+  /// Replace a resource wholesale.
+  ///
+  /// Distinct from [patch] and worth having both: PATCH merges the fields you
+  /// send, PUT means "this is the whole thing now". An ordered list is the
+  /// second kind — sending four names has to mean four, not "add these four to
+  /// whatever is already there".
+  Future<ApiResponse> put(String path, {Map<String, dynamic>? body}) {
+    final uri = _uri(path);
+    return _send(
+      'PUT',
+      uri,
+      () => _client.put(
+        uri,
+        headers: _headers,
+        body: body == null ? null : jsonEncode(body),
+      ),
+      body: body,
+    );
+  }
+
   Future<ApiResponse> patch(String path, {Map<String, dynamic>? body}) {
     final uri = _uri(path);
     return _send(
@@ -103,40 +123,16 @@ class ApiClient {
         ..fields.addAll(fields)
         ..files.add(await http.MultipartFile.fromPath(field, filePath));
 
-      final streamed = await request.send().timeout(AppConfig.uploadTimeout);
+      final streamed = await request.send().timeout(AppConfig.requestTimeout);
       final response = await http.Response.fromStream(streamed);
 
       ApiLogger.response('POST', uri, response.statusCode, response.body,
           DateTime.now().difference(started));
 
-      // nginx and PHP-FPM both refuse an oversized upload before Laravel
-      // ever sees it, and they answer with an HTML error page rather than
-      // our envelope. Decoding that as JSON throws, and the user is told
-      // "Upload failed: FormatException" — which points at nothing.
-      if (response.statusCode == 413) {
-        throw const ApiException(
-          'That file is too large to send.',
-          statusCode: 413,
-        );
-      }
-
-      try {
-        return ApiResponse.fromJson(
-          jsonDecode(response.body) as Map<String, dynamic>,
-          response.statusCode,
-        );
-      } on FormatException {
-        // Any other non-JSON body: a gateway error, a maintenance page. Say
-        // what the server actually returned rather than paraphrasing a
-        // parser failure.
-        throw ApiException(
-          'The server rejected that upload (${response.statusCode}).',
-          statusCode: response.statusCode,
-        );
-      }
-    } on ApiException {
-      // Already meaningful — do not rewrap it as "Upload failed: ...".
-      rethrow;
+      return ApiResponse.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>,
+        response.statusCode,
+      );
     } on SocketException catch (e) {
       ApiLogger.failure('POST', uri, e);
       throw const ApiException('No internet connection.');

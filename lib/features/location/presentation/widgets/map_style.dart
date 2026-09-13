@@ -15,9 +15,10 @@ import '../../../../core/theme/app_colors.dart';
 ///    everybody already knows from Uber and Zomato, because familiarity is
 ///    the whole point: a driver, a street and a junction should read exactly
 ///    the way they read in the app somebody used an hour ago.
-///  - [dark] is the same map at night. Quiet. Roads and water for
-///    orientation, place names so you can tell where somebody is, and
-///    nothing else — a person's face should be the brightest thing on screen.
+///  - [dark] is the same map at night, and carries the same landmarks. What
+///    changes is the light, not the content — losing the mall and the metro
+///    station after sunset would make the map useless at exactly the hour
+///    somebody is most likely to be worried about where a person is.
 ///  - [emergency] is the SOS map. Loud where it matters: hospitals, police
 ///    stations and pharmacies are drawn with their icons, because there the
 ///    map *is* the answer rather than the backdrop to it.
@@ -36,10 +37,13 @@ class MapStyle {
   | and dropping them in progressively as you zoom — city, then locality,
   | then neighbourhood, then street.
   |
-  | So labels are now tiered by importance rather than uniformly dimmed:
-  | localities brightest, neighbourhoods next, streets quietest. Icons stay
-  | off on the family map (they are business advertising, and they clutter),
-  | but the words stay on.
+  | So labels are tiered by importance rather than uniformly dimmed:
+  | localities brightest, neighbourhoods next, streets quietest.
+  |
+  | Icons were off here too, on the same mistaken reasoning as the daylight
+  | style — see the note above it. They are on now, desaturated rather than
+  | deleted, because a landmark is how a person works out *where in the
+  | neighbourhood* somebody is standing.
   |
   */
 
@@ -60,46 +64,46 @@ class MapStyle {
   | The daylight map
   |----------------------------------------------------------------------------
   |
-  | The temptation with a branded app is to theme the daylight map too — tint
-  | the roads, wash the land in the app's navy, make it *ours*. That is the
-  | wrong instinct here, and the reference screenshot is right to look
-  | ordinary.
+  | The temptation with a branded app is to theme the daylight map — tint the
+  | roads, wash the land in the app's navy, make it *ours*. That is the wrong
+  | instinct here. A family map is read under stress, often by somebody who is
+  | not technical, sometimes by a parent who has opened it because they are
+  | worried, and the most legible map is the one whose conventions are already
+  | in the reader's head from every ride-hailing and delivery app they use.
   |
-  | A family map is read under stress, often by somebody who is not
-  | technical, sometimes by a parent who has opened it because they are
-  | worried. In that moment the map has to be instantly legible, and the most
-  | legible map is the one whose conventions are already in the reader's head
-  | from every ride-hailing and delivery app they use. A distinctive map is a
-  | map you have to learn.
+  | ## What changed, and why the first version was wrong
   |
-  | So this is Google's own palette, barely touched. The changes are all
-  | subtractive and all in service of the markers:
+  | It turned business POIs off entirely, on the reasoning that they are
+  | advertising and every one of them competes with a face. That reasoning is
+  | half right and the conclusion was wrong.
   |
-  |   - Business POIs off entirely. They are advertising, they are dense in
-  |     exactly the urban areas where family members actually are, and every
-  |     one of them competes with a face.
-  |   - POI and road icons off, names kept. "Green Park" is orientation;
-  |     a pin for a salon is not.
-  |   - Land parcels off — plot outlines at high zoom are noise.
-  |   - Roads pure white with a soft grey casing, which is what makes a road
-  |     network read as a network rather than as a grey smear.
+  | A map with only locality names is not a quiet map, it is a *featureless*
+  | one. "Sector 62" tells you nothing about where in Sector 62 somebody is
+  | standing. The landmarks are how a person actually navigates — near the
+  | mall, opposite the hospital, by the metro station — and stripping them out
+  | removed the thing that turns a dot into a place.
   |
-  | Everything else — water blue, park green, the label hierarchy — is
-  | Google's, because Google spent a very long time on it.
+  | So the POIs are back, and the competition with the markers is handled the
+  | way it should have been in the first place: by *weight* rather than by
+  | deletion. Place labels sit a shade lighter than road names, icons are
+  | slightly desaturated so no single shopfront shouts, and the family markers
+  | stay the only fully saturated thing on screen. Google already fades POIs
+  | in progressively as you zoom, so the density looks after itself — sparse
+  | across a city, detailed down a street.
   */
   static const String light = '''
 [
   {"elementType":"geometry","stylers":[{"color":"#f4f6f8"}]},
-  {"elementType":"labels.text.fill","stylers":[{"color":"#5b6472"}]},
+  {"elementType":"labels.text.fill","stylers":[{"color":"#4a5261"}]},
   {"elementType":"labels.text.stroke",
    "stylers":[{"color":"#ffffff"},{"weight":2.5}]},
 
   {"featureType":"administrative","elementType":"geometry.stroke",
    "stylers":[{"color":"#d5dae1"}]},
   {"featureType":"administrative.locality","elementType":"labels.text.fill",
-   "stylers":[{"color":"#3d4654"}]},
+   "stylers":[{"color":"#2f3644"}]},
   {"featureType":"administrative.neighborhood","elementType":"labels.text.fill",
-   "stylers":[{"color":"#6b7484"}]},
+   "stylers":[{"color":"#5b6473"}]},
   {"featureType":"administrative.land_parcel","elementType":"labels",
    "stylers":[{"visibility":"off"}]},
 
@@ -108,24 +112,43 @@ class MapStyle {
   {"featureType":"landscape.natural","elementType":"geometry",
    "stylers":[{"color":"#eaf1e6"}]},
 
-  {"featureType":"poi","elementType":"labels.icon","stylers":[{"visibility":"off"}]},
-  {"featureType":"poi.business","stylers":[{"visibility":"off"}]},
+  {"featureType":"poi","stylers":[{"visibility":"on"}]},
+  {"featureType":"poi","elementType":"labels.icon",
+   "stylers":[{"visibility":"on"},{"saturation":-25}]},
+  {"featureType":"poi","elementType":"labels.text.fill",
+   "stylers":[{"color":"#6f7889"}]},
+
+  {"featureType":"poi.business","stylers":[{"visibility":"on"}]},
+  {"featureType":"poi.business","elementType":"labels.text.fill",
+   "stylers":[{"color":"#7b8494"}]},
+
+  {"featureType":"poi.attraction","elementType":"labels.text.fill",
+   "stylers":[{"color":"#8a6f52"}]},
   {"featureType":"poi.park","elementType":"geometry",
    "stylers":[{"color":"#d9ecd4"}]},
   {"featureType":"poi.park","elementType":"labels.text.fill",
    "stylers":[{"color":"#5f8a55"}]},
   {"featureType":"poi.medical","elementType":"geometry",
    "stylers":[{"color":"#fbe4e6"}]},
+  {"featureType":"poi.medical","elementType":"labels.text.fill",
+   "stylers":[{"color":"#a85a62"}]},
   {"featureType":"poi.school","elementType":"geometry",
    "stylers":[{"color":"#f6eede"}]},
+  {"featureType":"poi.school","elementType":"labels.text.fill",
+   "stylers":[{"color":"#8a7550"}]},
+  {"featureType":"poi.place_of_worship","elementType":"labels.text.fill",
+   "stylers":[{"color":"#7d7290"}]},
+  {"featureType":"poi.sports_complex","elementType":"labels.text.fill",
+   "stylers":[{"color":"#5f7f8a"}]},
+  {"featureType":"poi.government","elementType":"labels.text.fill",
+   "stylers":[{"color":"#5f7091"}]},
 
   {"featureType":"road","elementType":"geometry.fill",
    "stylers":[{"color":"#ffffff"}]},
   {"featureType":"road","elementType":"geometry.stroke",
    "stylers":[{"color":"#e2e6ec"}]},
-  {"featureType":"road","elementType":"labels.icon","stylers":[{"visibility":"off"}]},
   {"featureType":"road","elementType":"labels.text.fill",
-   "stylers":[{"color":"#7c8494"}]},
+   "stylers":[{"color":"#6e7686"}]},
   {"featureType":"road.arterial","elementType":"geometry.stroke",
    "stylers":[{"color":"#dbe0e8"}]},
   {"featureType":"road.highway","elementType":"geometry.fill",
@@ -135,14 +158,15 @@ class MapStyle {
   {"featureType":"road.highway","elementType":"labels.text.fill",
    "stylers":[{"color":"#6a6350"}]},
   {"featureType":"road.local","elementType":"labels.text.fill",
-   "stylers":[{"color":"#8d94a2"}]},
+   "stylers":[{"color":"#828a99"}]},
 
+  {"featureType":"transit","stylers":[{"visibility":"on"}]},
   {"featureType":"transit","elementType":"labels.icon",
-   "stylers":[{"visibility":"off"}]},
+   "stylers":[{"visibility":"on"},{"saturation":-20}]},
   {"featureType":"transit.line","elementType":"geometry",
-   "stylers":[{"color":"#e0e3e8"}]},
+   "stylers":[{"color":"#dfe3e9"}]},
   {"featureType":"transit.station","elementType":"labels.text.fill",
-   "stylers":[{"color":"#7c8494"}]},
+   "stylers":[{"color":"#5f7091"}]},
 
   {"featureType":"water","elementType":"geometry","stylers":[{"color":"#bfdff2"}]},
   {"featureType":"water","elementType":"labels.text.fill",
@@ -170,10 +194,20 @@ class MapStyle {
   {"featureType":"administrative.land_parcel","elementType":"labels",
    "stylers":[{"visibility":"off"}]},
 
-  {"featureType":"poi","elementType":"labels.icon","stylers":[{"visibility":"off"}]},
-  {"featureType":"poi.business","stylers":[{"visibility":"off"}]},
+  {"featureType":"poi","stylers":[{"visibility":"on"}]},
+  {"featureType":"poi","elementType":"labels.icon",
+   "stylers":[{"visibility":"on"},{"saturation":-30},{"lightness":-10}]},
+  {"featureType":"poi","elementType":"labels.text.fill",
+   "stylers":[{"color":"#8fa0bd"}]},
+  {"featureType":"poi.business","stylers":[{"visibility":"on"}]},
+  {"featureType":"poi.business","elementType":"labels.text.fill",
+   "stylers":[{"color":"#7e8fac"}]},
   {"featureType":"poi.attraction","elementType":"labels.text.fill",
-   "stylers":[{"color":"#8fa2c2"}]},
+   "stylers":[{"color":"#c2a98f"}]},
+  {"featureType":"poi.medical","elementType":"labels.text.fill",
+   "stylers":[{"color":"#c68f99"}]},
+  {"featureType":"poi.school","elementType":"labels.text.fill",
+   "stylers":[{"color":"#bda87f"}]},
   {"featureType":"poi.park","elementType":"geometry",
    "stylers":[{"color":"#0d2a2c"}]},
   {"featureType":"poi.park","elementType":"labels.text.fill",
@@ -195,7 +229,7 @@ class MapStyle {
    "stylers":[{"color":"#aebbd6"}]},
 
   {"featureType":"transit","elementType":"labels.icon",
-   "stylers":[{"visibility":"off"}]},
+   "stylers":[{"visibility":"on"},{"saturation":-30},{"lightness":-10}]},
   {"featureType":"transit.line","elementType":"geometry",
    "stylers":[{"color":"#1a2540"}]},
   {"featureType":"transit.station","elementType":"labels.text.fill",

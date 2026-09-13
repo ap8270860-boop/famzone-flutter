@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 
 import '../../../core/session/session.dart';
+import '../../safety/data/safety_api.dart';
+import '../../safety/state/safety_store.dart';
 import '../data/people_api.dart';
 import '../data/people_models.dart';
 import 'family_store.dart';
@@ -16,6 +18,10 @@ class NotificationStore extends ChangeNotifier {
   static final NotificationStore instance = NotificationStore._();
 
   final PeopleApi _api = PeopleApi();
+
+  /// Check-in requests are answered against the safety endpoints, not the
+  /// people ones — see [respond].
+  final SafetyApi _safety = SafetyApi();
 
   List<AppNotification> _items = const [];
   int _unread = 0;
@@ -97,15 +103,29 @@ class NotificationStore extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final res = action.isFollowRequest
-          ? await _api.respondToFollowRequest(action.id, accept)
-          : await _api.respondToFamilyInvite(action.id, accept);
+      /*
+       | Three kinds of request, three endpoints.
+       |
+       | A check-in is the one that does not go through PeopleApi: it belongs
+       | to safety, and answering it has to move SafetyStore's incoming list
+       | as well as this feed — the same request is on the home screen with
+       | the same two buttons, and leaving it there after it was answered here
+       | would be the exact stale-button bug this whole derived-action design
+       | exists to prevent.
+       */
+      final res = action.isCheckInRequest
+          ? await _safety.respondToRequest(action.id, accept)
+          : action.isFollowRequest
+              ? await _api.respondToFollowRequest(action.id, accept)
+              : await _api.respondToFamilyInvite(action.id, accept);
 
       if (res.success) {
         await load();
 
-        // Accepting a family invite changes the home strip too.
-        if (!action.isFollowRequest && accept) {
+        if (action.isCheckInRequest) {
+          await SafetyStore.instance.loadIncoming();
+        } else if (!action.isFollowRequest && accept) {
+          // Accepting a family invite changes the home strip too.
           await FamilyStore.instance.load();
         }
       }

@@ -8,6 +8,7 @@ import '../../../core/config/app_config.dart';
 import '../../../core/realtime/reverb_socket.dart';
 import '../../../core/session/session.dart';
 import '../../location/state/location_store.dart';
+import '../../safety/state/safety_store.dart';
 import '../../sos/state/sos_store.dart';
 import '../data/chat_api.dart';
 import 'chat_store.dart';
@@ -303,6 +304,37 @@ class RealtimeClient extends ChangeNotifier {
          | broadcasting on one at all.
          */
         LocationStore.instance.applyPlaceCrossing(data);
+
+        return;
+
+      case 'check_in.requested':
+        /*
+         | A family member checked in and it is my turn to confirm.
+         |
+         | On the mailbox and sent to exactly one person — whoever currently
+         | holds the request. The chain's whole purpose is that the second
+         | person is not disturbed while the first still has it, so this is
+         | never a broadcast to the family.
+         |
+         | The store also holds the durable list, refreshed on every app open,
+         | so a frame missed while the socket was down costs nothing.
+         */
+        SafetyStore.instance.applyIncomingRequest(data);
+
+        return;
+
+      case 'check_in.acknowledged':
+        /*
+         | Somebody answered my check-in, or my whole list ran out.
+         |
+         | One event for both endings — the client's job either way is to
+         | replace the chain it is holding with the one in this frame, and two
+         | handlers would be two chances to forget one.
+         |
+         | This is what makes the progress bar move while somebody is watching
+         | it, which is the entire reason the frame exists.
+         */
+        SafetyStore.instance.applyChain(data);
 
         return;
 

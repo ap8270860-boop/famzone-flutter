@@ -81,19 +81,100 @@ class LocationTracker extends ChangeNotifier {
   /// nothing, every time — so doing it needlessly would show up as exactly
   /// the stutter this whole class exists to avoid.
   Future<void> apply(TrackingPlan next) async {
-    final previous = _plan;
     _plan = next;
 
-    if (!next.active) {
-      await stop();
+    // Not `stop()` any more. A share ending does not necessarily mean the
+    // stream should close — somebody may still be looking at the map, and
+    // their own dot should keep working.
+    await _reconcile();
+  }
+
+  /*
+  |----------------------------------------------------------------------------
+  | Watching without sharing
+  |----------------------------------------------------------------------------
+  |
+  | The bug this exists for: "my own marker sometimes appears and sometimes
+  | does not, and when I stop sharing it shows up."
+  |
+  | [myPosition] was only ever written by the tracking stream, and the
+  | tracking stream only ran while a share was live. So the map had no idea
+  | where its own user was until a share had been running long enough for the
+  | first satellite lock — five seconds on a good day, thirty inside a
+  | building — and had no idea at all when nothing was being shared. Whether
+  | the marker appeared came down to how long you had been staring at the
+  | screen, which is exactly the inconsistency that was reported.
+  |
+  | Opening the map is itself a reason to know where you are. So the screen
+  | takes a *hold*: while it is on screen the stream runs regardless of
+  | sharing, at a gentler rate, and nothing is uploaded unless a share is
+  | actually live. Permission to see yourself on your own phone is not the
+  | same as permission to broadcast, and the two are kept apart here rather
+  | than in the caller.
+  */
+
+  int _holds = 0;
+
+  /// The plan used when nobody is sharing but somebody is looking at a map.
+  ///
+  /// Coarser than the sharing plans: this only has to keep a dot honest on a
+  /// screen the user is already looking at, so it costs far less than the
+  /// five-second plan and is still far better than nothing.
+  static const TrackingPlan _watchPlan = TrackingPlan(
+    active: true,
+    intervalSeconds: 10,
+    distanceFilter: 15,
+  );
+
+  /// Called by a screen that needs the user's own position on it.
+  ///
+  /// Reference counted, because two map screens can be stacked — the history
+  /// screen over the live one — and the second one closing must not switch
+  /// the first one's dot off.
+  Future<void> hold() async {
+    _holds++;
+
+    if (_holds == 1) await _reconcile();
+  }
+
+  Future<void> release() async {
+    if (_holds > 0) _holds--;
+
+    if (_holds == 0) await _reconcile();
+  }
+
+  /// The plan actually in force: the server's if a share is live, the watch
+  /// plan if only a screen is asking, nothing otherwise.
+  TrackingPlan get _effective {
+    if (_plan.active) return _plan;
+    if (_holds > 0) return _watchPlan;
+
+    return const TrackingPlan.idle();
+  }
+
+  /// Whether fixes may leave the device.
+  ///
+  /// Only a live share earns that. A hold is somebody looking at their own
+  /// map, and looking at your own map is not consent to be recorded.
+  bool get _uploading => _plan.active;
+
+  Future<void> _reconcile() async {
+    final wanted = _effective;
+
+    if (!wanted.active) {
+      await _teardown();
 
       return;
     }
 
-    if (running && previous.sameShapeAs(next)) return;
+    if (running && _running != null && _running!.sameShapeAs(wanted)) return;
 
     await _restart();
   }
+
+  /// The plan the open stream was configured with, so a reconcile can tell
+  /// whether anything actually needs reopening.
+  TrackingPlan? _running;
 
   /// Why the stream is not running, when it is not running.
   ///
@@ -108,7 +189,10 @@ class LocationTracker extends ChangeNotifier {
   Future<void> _restart() async {
     await _cancel();
 
-    final settings = _settings();
+    final plan = _effective;
+    _running = plan;
+
+    final settings = _settings(plan);
 
     try {
       _stream = Geolocator.getPositionStream(locationSettings: settings).listen(
@@ -164,24 +248,40 @@ class LocationTracker extends ChangeNotifier {
     }
   }
 
-  /// Stop everything and tell nobody. Ending a share is what tells people.
+  /// Stop sharing. Tell nobody — ending a share is what tells people.
+  ///
+  /// The stream may well keep running afterwards: if a map screen is open,
+  /// its hold keeps the user's own dot alive. What stops is the *uploading*.
   Future<void> stop() async {
+    _plan = const TrackingPlan.idle();
+
+    // Anything already measured is still worth sending — the last fix before
+    // somebody taps "stop sharing" is the most interesting one in the buffer.
+    await flush();
+
+    await _reconcile();
+
+    notifyListeners();
+  }
+
+  /// Close the stream outright. Only when nothing wants it at all.
+  Future<void> _teardown() async {
     await _cancel();
 
     _flusher?.cancel();
     _flusher = null;
 
-    _plan = const TrackingPlan.idle();
+    _running = null;
 
-    // Forget the anchor too. A stream restarted an hour later would
+    // Forget the movement anchor. A stream restarted an hour later would
     // otherwise measure its first displacement against wherever the phone
-    // was when sharing stopped.
+    // was when it closed.
+    //
+    // [_mine] deliberately survives: the last known position is still the
+    // best answer to "where am I" until a better one arrives, and throwing
+    // it away is what made the marker vanish when a share ended.
     _anchor = null;
     _moving = false;
-
-    // Anything already measured is still worth sending — the last fix before
-    // somebody taps "stop sharing" is the most interesting one in the buffer.
-    await flush();
 
     notifyListeners();
   }
@@ -194,9 +294,9 @@ class LocationTracker extends ChangeNotifier {
 
   /// The two platforms are configured differently enough that a shared
   /// LocationSettings would be a lowest common denominator on both.
-  LocationSettings _settings() {
-    final distance = _plan.distance;
-    final interval = _plan.interval;
+  LocationSettings _settings(TrackingPlan plan) {
+    final distance = plan.distance;
+    final interval = plan.interval;
 
     if (Platform.isAndroid) {
       return AndroidSettings(
@@ -212,7 +312,7 @@ class LocationTracker extends ChangeNotifier {
          */
         intervalDuration: interval,
 
-        foregroundNotificationConfig: _plan.background
+        foregroundNotificationConfig: plan.background
             ? const ForegroundNotificationConfig(
                 notificationTitle: 'SFamily is sharing your location',
                 notificationText:
@@ -246,7 +346,7 @@ class LocationTracker extends ChangeNotifier {
          */
         pauseLocationUpdatesAutomatically: false,
 
-        allowBackgroundLocationUpdates: _plan.background,
+        allowBackgroundLocationUpdates: plan.background,
 
         /*
          | The blue "using your location" bar, when running in the background.
@@ -255,7 +355,7 @@ class LocationTracker extends ChangeNotifier {
          | a person should never have to open an app to find out it is
          | tracking them.
          */
-        showBackgroundLocationIndicator: _plan.background,
+        showBackgroundLocationIndicator: plan.background,
       );
     }
 
@@ -307,13 +407,29 @@ class LocationTracker extends ChangeNotifier {
     // cannot make this retry on every single fix.
     _batteryAt = DateTime.now();
 
-    _battery.batteryLevel.then((level) {
+    _readBattery();
+  }
+
+  /// Read it, and survive a platform that has no answer.
+  ///
+  /// This was a `.then().catchError(() => 0)` and the analyser was right to
+  /// object: `then` with a void body produces a `Future<Null>`, so the error
+  /// handler has to return null, not an int. It would have thrown a TypeError
+  /// into the zone on exactly the devices the catch existed for — an
+  /// emulator, or anything without a battery API — which is the worst
+  /// possible place for a crash to appear, because it only happens where
+  /// nobody is testing.
+  ///
+  /// A plain try/catch cannot get this wrong.
+  Future<void> _readBattery() async {
+    try {
+      final level = await _battery.batteryLevel;
+
       if (level >= 0 && level <= 100) _batteryLevel = level;
-    }).catchError((_) {
-      // An emulator or a desktop without a battery. Null is a perfectly good
-      // answer and the UI already draws a dash for it.
-      return 0;
-    });
+    } catch (_) {
+      // No battery API. Null is a perfectly good answer and the UI already
+      // draws a dash for it.
+    }
   }
 
   /*
@@ -399,6 +515,48 @@ class LocationTracker extends ChangeNotifier {
     return _moving;
   }
 
+  /// Set the local dot from a raw position, without going near the buffer.
+  ///
+  /// Used by the one-shot and last-known paths, which have no business
+  /// queueing anything for upload — they exist purely so the map has
+  /// something to draw immediately.
+  void _adopt(Position position) {
+    _mine = LivePosition(
+      userId: Session.instance.user?.id ?? '',
+      hasFix: true,
+      latitude: position.latitude,
+      longitude: position.longitude,
+      accuracy: position.accuracy,
+      speed: position.speed < 0 ? null : position.speed,
+      heading: position.heading >= 0 ? position.heading : null,
+      moving: _moving,
+      batteryLevel: _batteryLevel,
+      recordedAt: position.timestamp,
+      ageSeconds: 0,
+    );
+
+    notifyListeners();
+  }
+
+  /// The fastest possible answer to "where am I", for a screen that has just
+  /// opened.
+  ///
+  /// `getLastKnownPosition` is usually instant and often minutes old, which
+  /// is the right trade for a first paint: a marker in roughly the right
+  /// place now beats an empty map for the fifteen seconds a cold lock takes.
+  /// The stream overwrites it as soon as it has something better.
+  Future<void> primeFromLastKnown() async {
+    if (_mine != null) return;
+
+    try {
+      final position = await Geolocator.getLastKnownPosition();
+
+      if (position != null && _mine == null) _adopt(position);
+    } catch (_) {
+      // No permission, or no cached fix. Both are ordinary.
+    }
+  }
+
   void _onFix(Position position) {
     _refreshBattery();
 
@@ -431,13 +589,23 @@ class LocationTracker extends ChangeNotifier {
       batteryLevel: _batteryLevel,
     );
 
-    _buffer.add(fix);
+    /*
+     | Buffered only while a share is live.
+     |
+     | A hold — somebody looking at their own map — moves the local dot and
+     | nothing else. Uploading fixes taken under a hold would mean recording a
+     | position nobody agreed to share, which is the one line this feature
+     | must not cross.
+     */
+    if (_uploading) _buffer.add(fix);
 
     if (_buffer.length > _bufferCap) {
       _buffer.removeRange(0, _buffer.length - _bufferCap);
     }
 
-    // The local dot moves now, not when the network agrees.
+    // The local dot moves now, not when the network agrees — and it moves
+    // whether or not anything is being shared. This is the line that makes
+    // "You" appear on the map the moment it opens.
     _mine = LivePosition(
       userId: Session.instance.user?.id ?? '',
       hasFix: true,
@@ -454,7 +622,7 @@ class LocationTracker extends ChangeNotifier {
 
     notifyListeners();
 
-    if (_buffer.length >= _flushAt) flush();
+    if (_uploading && _buffer.length >= _flushAt) flush();
   }
 
   /// Send whatever has piled up.
@@ -536,6 +704,17 @@ class LocationTracker extends ChangeNotifier {
     position ??= await Geolocator.getLastKnownPosition();
 
     if (position == null) return null;
+
+    /*
+     | Prime the local dot from this one-shot.
+     |
+     | It used to be thrown away after moving the camera, which meant opening
+     | the map put the camera in the right place and drew no marker there —
+     | the single most confusing thing this screen did. A one-shot or even a
+     | last-known fix is a perfectly good answer to "where am I" until the
+     | stream produces a better one.
+     */
+    _adopt(position);
 
     return LocationFix(
       latitude: position.latitude,

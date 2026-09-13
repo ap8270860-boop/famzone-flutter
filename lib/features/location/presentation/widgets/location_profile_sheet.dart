@@ -1,7 +1,3 @@
-// FontFeature, for tabular figures on the coordinates — without them a
-// latitude re-flows sideways every time a digit changes.
-import 'dart:ui' show FontFeature;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -471,36 +467,91 @@ class _Headline extends StatelessWidget {
   final String distance;
   final String reach;
 
+  /// The distance said the way a person would say it — "12.4 km", "850 m".
+  String get sentence => distance;
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 13),
+      padding: const EdgeInsets.fromLTRB(0, 12, 0, 13),
       decoration: BoxDecoration(
         color: palette.accent.withValues(alpha: 0.09),
         borderRadius: BorderRadius.circular(15),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: _Half(
-              palette: palette,
-              icon: Icons.straighten_rounded,
-              value: distance,
-              label: 'Away from you',
+          /*
+           | The sentence first, the figures under it.
+           |
+           | "12.4 km" in a stat tile is a number somebody has to interpret;
+           | "12.4 km away from you" is the answer to the question they
+           | actually opened the sheet with. The tiles below still carry it,
+           | because a glance finds a big number faster than it reads a line —
+           | but the line is what makes the number mean something.
+           */
+          Padding(
+            padding: const EdgeInsets.only(bottom: 11),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.near_me_rounded, size: 15, color: palette.accent),
+                const SizedBox(width: 7),
+                Flexible(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: RichText(
+                      maxLines: 1,
+                      text: TextSpan(
+                        children: [
+                          TextSpan(
+                            text: sentence,
+                            style: TextStyle(
+                              color: palette.textPrimary,
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          TextSpan(
+                            text: ' away from you',
+                            style: TextStyle(
+                              color: palette.textMuted,
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-          Container(
-            width: 1,
-            height: 34,
-            color: palette.textMuted.withValues(alpha: 0.22),
-          ),
-          Expanded(
-            child: _Half(
-              palette: palette,
-              icon: Icons.schedule_rounded,
-              value: reach,
-              label: 'To reach them',
-            ),
+          Row(
+            children: [
+              Expanded(
+                child: _Half(
+                  palette: palette,
+                  icon: Icons.straighten_rounded,
+                  value: distance,
+                  label: 'Distance',
+                ),
+              ),
+              Container(
+                width: 1,
+                height: 34,
+                color: palette.textMuted.withValues(alpha: 0.22),
+              ),
+              Expanded(
+                child: _Half(
+                  palette: palette,
+                  icon: Icons.schedule_rounded,
+                  value: reach,
+                  label: 'To reach them',
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -950,6 +1001,8 @@ class _Coordinates extends StatelessWidget {
                       color: palette.textPrimary,
                       fontSize: 13.5,
                       fontWeight: FontWeight.w700,
+                      // Tabular figures: without them a latitude re-flows
+                      // sideways every time a digit changes.
                       fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),

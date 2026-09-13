@@ -19,19 +19,26 @@ class FamilyStatusCard extends StatelessWidget {
     super.key,
     required this.status,
     required this.palette,
-    this.onViewAll,
+    this.onToggle,
     this.collapsed = false,
   });
 
   final FamilyStatus status;
   final MapPalette palette;
-  final VoidCallback? onViewAll;
 
-  /// Shown as a single line while somebody is looking at the map.
+  /// Fold the card away, or bring it back.
   ///
-  /// The full card is 150-odd pixels of a phone screen, and the moment a
-  /// person starts panning, the map is what they want that space for. It
-  /// expands again when they let go.
+  /// This replaced a "View All" link, which was the wrong control in the
+  /// wrong place. The card is a third of a phone screen and the screen it
+  /// sits on is a map — so the thing a person wants from that corner is not
+  /// another destination, it is *their map back*.
+  final VoidCallback? onToggle;
+
+  /// Shown as a single line.
+  ///
+  /// Two things collapse it: a deliberate tap on the chevron, which sticks,
+  /// and panning the map, which does not. Both funnel through this one flag
+  /// so the card never has to reason about why it is small.
   final bool collapsed;
 
   @override
@@ -53,7 +60,7 @@ class FamilyStatusCard extends StatelessWidget {
             ),
           ],
         ),
-        child: collapsed ? _summaryLine() : _full(),
+        child: collapsed ? _collapsedBar() : _full(),
       ),
     );
   }
@@ -77,29 +84,7 @@ class FamilyStatusCard extends StatelessWidget {
                 ),
               ),
               const Spacer(),
-              if (onViewAll != null)
-                TextButton(
-                  onPressed: onViewAll,
-                  style: TextButton.styleFrom(
-                    foregroundColor: palette.accent,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    minimumSize: const Size(0, 32),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'View All',
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      Icon(Icons.chevron_right_rounded, size: 17),
-                    ],
-                  ),
-                ),
+              _Chevron(palette: palette, collapsed: false, onTap: onToggle),
             ],
           ),
         ),
@@ -115,6 +100,35 @@ class FamilyStatusCard extends StatelessWidget {
         Divider(height: 1, thickness: 1, color: palette.border),
         _summaryLine(),
       ],
+    );
+  }
+
+  /// The one-line form: the verdict, and the way back.
+  ///
+  /// The whole bar is tappable, not just the chevron. A 44dp target in the
+  /// corner is the minimum anybody should have to hit; a person reaching for
+  /// a card they just folded away will aim at the card.
+  Widget _collapsedBar() {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(20),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onToggle,
+        child: Row(
+          children: [
+            Expanded(child: _summaryLine()),
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: _Chevron(
+                palette: palette,
+                collapsed: true,
+                onTap: onToggle,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -173,6 +187,56 @@ class FamilyStatusCard extends StatelessWidget {
         'empty' => Icons.group_add_rounded,
         _ => Icons.check_circle_rounded,
       };
+}
+
+/// The open/close control.
+///
+/// Rotates rather than swapping glyph, so the two states read as one control
+/// turning over instead of two different buttons appearing in the same spot.
+class _Chevron extends StatelessWidget {
+  const _Chevron({
+    required this.palette,
+    required this.collapsed,
+    required this.onTap,
+  });
+
+  final MapPalette palette;
+  final bool collapsed;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    if (onTap == null) return const SizedBox.shrink();
+
+    return Semantics(
+      button: true,
+      label: collapsed ? 'Show family status' : 'Hide family status',
+      child: Material(
+        color: palette.textMuted.withValues(alpha: 0.08),
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            width: 32,
+            height: 32,
+            child: AnimatedRotation(
+              // Half a turn, matched to the card's own resize so the arrow
+              // and the panel move as one thing.
+              turns: collapsed ? 0.5 : 0,
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              child: Icon(
+                Icons.keyboard_arrow_up_rounded,
+                size: 20,
+                color: palette.textMuted,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// One count, with its glyph.

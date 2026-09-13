@@ -111,6 +111,13 @@ class _LiveMapScreenState extends State<LiveMapScreen>
   int _selfMoveUntilMs = 0;
   bool _traffic = false;
   bool _panning = false;
+
+  /// Folded away by hand, and it stays folded.
+  ///
+  /// Separate from [_panning], which folds it only for the duration of a
+  /// gesture. Keeping the two apart is what lets a deliberate collapse
+  /// survive a pan, and a pan restore a card the user had open.
+  bool _cardFolded = false;
   MapType _type = MapType.normal;
 
   int _lastCameraMs = 0;
@@ -147,6 +154,21 @@ class _LiveMapScreenState extends State<LiveMapScreen>
 
     _ticker = createTicker(_onTick)..start();
 
+    /*
+     | Two things, in this order, and both matter.
+     |
+     | The hold keeps a location stream running for as long as this screen is
+     | open, share or no share — so "You" is on the map because you are
+     | looking at a map, not because you happen to be broadcasting.
+     |
+     | The prime paints a marker *now* from the phone's last known position,
+     | which is usually instant. Without it the screen is markerless for the
+     | five to thirty seconds a cold satellite lock takes, which is the whole
+     | of most visits.
+     */
+    _tracker.hold();
+    _tracker.primeFromLastKnown();
+
     _boot();
   }
 
@@ -157,6 +179,10 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     _store.removeListener(_onData);
     _tracker.removeListener(_onData);
     ChatStore.instance.removeListener(_onData);
+
+    // Hand the stream back. If a share is still running it carries on at the
+    // server's rate; if not, it closes.
+    _tracker.release();
 
     _ticker?.dispose();
     _map?.dispose();
@@ -486,7 +512,19 @@ class _LiveMapScreenState extends State<LiveMapScreen>
       fillColor: tint.withValues(alpha: draft ? 0.16 : 0.09),
       strokeColor: tint.withValues(alpha: draft ? 0.95 : 0.55),
       strokeWidth: draft ? 3 : 2,
-      consumeTapEvents: false,
+
+      /*
+       | Tappable, so the circle itself is a way in.
+       |
+       | The name pill hides when the circle is small on screen, which left
+       | places unreachable at a wide zoom — and therefore undeletable. The
+       | circle is always there.
+       |
+       | Not while drafting: during an edit the circle is a preview, and a tap
+       | on it would reopen the sheet that is already open.
+       */
+      consumeTapEvents: !draft,
+      onTap: draft ? null : () => _editPlace(place),
     );
   }
 
@@ -533,7 +571,13 @@ class _LiveMapScreenState extends State<LiveMapScreen>
 
           // Under the people. A place is where somebody is, and if the two
           // overlap it is the person you came to look at.
-          zIndex: 0.5,
+          //
+          // zIndexInt, not zIndex: the double version is deprecated because
+          // some platforms truncate it to an int, which would collapse 0.5
+          // to 0 on one platform and keep it on another. Layering that
+          // differs between Android and iOS is the kind of bug nobody
+          // reproduces.
+          zIndexInt: 0,
           onTap: () => _editPlace(place),
         ),
       );
@@ -554,7 +598,8 @@ class _LiveMapScreenState extends State<LiveMapScreen>
             // height north of where they are.
             anchor: AvatarMarker.anchorFor(),
 
-            zIndex: entry.key == _meKey ? 2.0 : 1.0,
+            // Me on top of everybody else, everybody else on top of places.
+            zIndexInt: entry.key == _meKey ? 2 : 1,
             onTap: () => _onMarkerTap(entry.key),
           ),
     };
@@ -647,8 +692,29 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     );
   }
 
-  /// Long-pressed the map, or tapped Add place. Draft a circle here.
+  /// Long-pressed the map, or tapped Add place.
+  ///
+  /// Inside an existing circle this opens *that* place rather than stacking a
+  /// new one on top of it. Two reasons, and the second is the important one.
+  ///
+  /// Overlapping circles are almost never wanted — somebody pressing inside
+  /// their own Home is far more likely to be reaching for it than to be
+  /// defining a second place in the same garden.
+  ///
+  /// And it is how a place gets deleted. The pill carrying a place's name
+  /// only appears once the circle is big enough on screen to be worth
+  /// labelling, so at a wide zoom there was nothing to tap and no way to
+  /// remove a place from the map at all. The gesture that creates them now
+  /// also reaches them.
   Future<void> _newPlace(LatLng at) async {
+    final existing = _placeAt(at);
+
+    if (existing != null) {
+      await _editPlace(existing);
+
+      return;
+    }
+
     await _openEditor(
       FamilyPlace(
         id: '',
@@ -663,6 +729,30 @@ class _LiveMapScreenState extends State<LiveMapScreen>
   }
 
   Future<void> _editPlace(FamilyPlace place) => _openEditor(place, isNew: false);
+
+  /// The smallest of my places containing this point, if any.
+  ///
+  /// Smallest rather than first: a school inside a wider neighbourhood circle
+  /// should be what a press on the school reaches, which is the same rule the
+  /// server uses when it decides what to call somebody's position.
+  FamilyPlace? _placeAt(LatLng at) {
+    FamilyPlace? best;
+
+    for (final place in _store.places) {
+      final metres = Geo.metresBetween(
+        at.latitude,
+        at.longitude,
+        place.latitude,
+        place.longitude,
+      );
+
+      if (metres > place.radiusMetres) continue;
+
+      if (best == null || place.radiusMetres < best.radiusMetres) best = place;
+    }
+
+    return best;
+  }
 
   Future<void> _openEditor(FamilyPlace place, {required bool isNew}) async {
     setState(() {
@@ -730,15 +820,61 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     }
   }
 
+  /// Remove a place, having asked first.
+  ///
+  /// The list screen already confirmed and the map did not, which is exactly
+  /// backwards: on the map the delete button sits next to a circle somebody
+  /// is mid-way through adjusting, so a misplaced tap is *more* likely here,
+  /// not less.
+  ///
+  /// The question names the place and says what stops. "Are you sure?" is a
+  /// question nobody reads.
   Future<void> _deletePlace(FamilyPlace place) async {
-    await _store.deletePlace(place.id);
+    final palette = _palette;
 
-    if (mounted) {
-      setState(() {
-        _draft = null;
-        _rebuildMarkers();
-      });
-    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: palette.surface,
+        title: Text(
+          'Remove ${place.name}?',
+          style: TextStyle(color: palette.textPrimary, fontSize: 17),
+        ),
+        content: Text(
+          'Arrival and departure alerts for this place stop, and it comes off '
+          'the map. Nobody else in your family is affected.',
+          style: TextStyle(color: palette.textMuted, height: 1.45),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Keep it'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFFE5484D),
+            ),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    final removed = await _store.deletePlace(place.id);
+
+    if (!mounted) return;
+
+    setState(() {
+      _draft = null;
+      _rebuildMarkers();
+    });
+
+    // Close the editor the delete was launched from — but only on success, so
+    // a server refusal leaves the sheet open with the place still in it.
+    if (removed) Navigator.of(context).pop();
   }
 
   /// A zoom at which a circle of this radius fills a comfortable part of the
@@ -999,8 +1135,9 @@ class _LiveMapScreenState extends State<LiveMapScreen>
                       FamilyStatusCard(
                         status: _store.status,
                         palette: palette,
-                        collapsed: _panning,
-                        onViewAll: _fitAll,
+                        collapsed: _cardFolded || _panning,
+                        onToggle: () =>
+                            setState(() => _cardFolded = !_cardFolded),
                       ),
                       CrossingBanner(
                         crossing: _store.crossing,

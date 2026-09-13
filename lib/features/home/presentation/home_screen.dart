@@ -10,6 +10,8 @@ import '../../people/presentation/search_people_screen.dart';
 import '../../people/presentation/user_profile_screen.dart';
 import '../../people/state/family_store.dart';
 import '../../people/state/notification_store.dart';
+import '../../safety/presentation/check_in_contacts_sheet.dart';
+import '../../safety/presentation/widgets/incoming_check_in_card.dart';
 import '../../safety/state/safety_store.dart';
 import '../../../core/theme/app_colors.dart';
 import 'widgets/check_in_card.dart';
@@ -44,6 +46,12 @@ class _HomeScreenState extends State<HomeScreen> {
     // showing the initials fallback to somebody who has a photo set.
     syncSession();
     SafetyStore.instance.load();
+
+    // Separate from load(): this is other people's check-ins waiting on me,
+    // and it has to be right on a cold start even if the websocket frame that
+    // announced it arrived while the app was closed.
+    SafetyStore.instance.loadIncoming();
+
     FamilyStore.instance.load();
     NotificationStore.instance.refreshBadge();
   }
@@ -103,10 +111,93 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Mark today safe.
   ///
-  /// The store repaints both cards optimistically before the request
-  /// leaves, so the only thing left to do here is report the outcome.
+  /// The first tap is not a check-in.
+  ///
+  /// With no list chosen there is nobody to tell, and checking in silently
+  /// would teach somebody that the button does nothing visible — so the first
+  /// tap opens the picker, and the check-in rides along with the Save. Every
+  /// tap after that goes straight through, which is what makes it a daily
+  /// habit rather than a form.
+  ///
+  /// The store repaints both cards optimistically before the request leaves,
+  /// so the only thing left to do here is report the outcome.
   Future<void> _checkIn() async {
+    if (!SafetyStore.instance.hasContacts) {
+      await _chooseContacts(thenCheckIn: true);
+
+      return;
+    }
+
     final outcome = await SafetyStore.instance.checkIn();
+
+    if (!mounted || outcome.message == null) return;
+
+    AppToast.show(
+      context,
+      outcome.message!,
+      type: outcome.ok ? ToastType.success : ToastType.error,
+    );
+  }
+
+  /// Open the order picker.
+  ///
+  /// [thenCheckIn] folds the two actions into one request rather than saving
+  /// and then checking in separately. Two requests would leave a window where
+  /// the list is saved but the check-in failed, and the user would come back
+  /// to a configured list and no check-in with nothing explaining why.
+  Future<void> _chooseContacts({bool thenCheckIn = false}) async {
+    final book = await SafetyStore.instance.contactBook();
+
+    if (!mounted) return;
+
+    if (book == null) {
+      AppToast.show(
+        context,
+        'Could not load your family list. Try again.',
+        type: ToastType.error,
+      );
+
+      return;
+    }
+
+    final chosen = await CheckInContactsSheet.show(
+      context,
+      book: book,
+      saveLabel: thenCheckIn ? 'Save & check in' : 'Save order',
+      intro: thenCheckIn
+          ? 'Choose who hears that you are safe, and in what order. We ask '
+              'them one at a time — as soon as somebody confirms, the rest are '
+              'never disturbed.'
+          : null,
+    );
+
+    // Dismissed. An empty list is a real answer and is not this.
+    if (chosen == null || !mounted) return;
+
+    final outcome = thenCheckIn
+        ? await SafetyStore.instance.checkIn(contacts: chosen)
+        : await SafetyStore.instance.saveContacts(chosen);
+
+    if (!mounted || outcome.message == null) return;
+
+    AppToast.show(
+      context,
+      outcome.message!,
+      type: outcome.ok ? ToastType.success : ToastType.error,
+    );
+  }
+
+  /// Answer somebody else's check-in.
+  ///
+  /// Never treated as a failure for being late. A request that moved on while
+  /// the phone was locked comes back as a success with a sentence saying so,
+  /// which is the true and useful thing to show — the tap did not fail, the
+  /// world moved.
+  Future<void> _answerCheckIn(String requestId, bool accept) async {
+    final outcome = await SafetyStore.instance.respond(
+      requestId: requestId,
+      accept: accept,
+    );
 
     if (!mounted || outcome.message == null) return;
 
@@ -122,6 +213,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await Future.wait([
       syncSession(),
       SafetyStore.instance.load(),
+      SafetyStore.instance.loadIncoming(),
       FamilyStore.instance.load(),
       NotificationStore.instance.refreshBadge(),
     ]);
@@ -181,6 +273,24 @@ class _HomeScreenState extends State<HomeScreen> {
               _Greeting(name: user?.firstName ?? 'there'),
               const SizedBox(height: 18),
 
+              /*
+               | Somebody is waiting on an answer.
+               |
+               | Above the user's own status on purpose. This is the only card
+               | here that represents another person's clock running down, and
+               | putting it under the fold would mean the chain moves on
+               | because the request was three scrolls away.
+               */
+              for (final request in SafetyStore.instance.incoming) ...[
+                IncomingCheckInCard(
+                  request: request,
+                  busy: SafetyStore.instance.isAnswering(request.id),
+                  onAccept: () => _answerCheckIn(request.id, true),
+                  onDecline: () => _answerCheckIn(request.id, false),
+                ),
+                const SizedBox(height: 14),
+              ],
+
               SafetyStatusCard(
                 status: SafetyStore.instance.status,
                 loading: SafetyStore.instance.loading,
@@ -194,6 +304,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 info: SafetyStore.instance.status?.checkIn,
                 submitting: SafetyStore.instance.submitting,
                 onCheckIn: _checkIn,
+                onEditContacts: () => _chooseContacts(),
               ),
               const SizedBox(height: 24),
 

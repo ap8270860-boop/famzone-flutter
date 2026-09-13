@@ -381,10 +381,24 @@ class LocationStore extends ChangeNotifier {
             user: member.user,
             sharing: true,
             presence: member.presence,
+
+            /*
+             | A live frame carries a position, not a place.
+             |
+             | An earlier version recomputed `movement` here as
+             | travelling/stationary unconditionally, which silently threw the
+             | place away — somebody sitting at home flipped from "At Home" to
+             | "Not moving" on their very next ping and stayed that way until
+             | the next full load. The place survives until the server says
+             | otherwise, which it does on the next `live` call.
+             */
             movement: position.isStale
                 ? 'stale'
-                : (position.moving ? 'travelling' : 'stationary'),
+                : member.place != null
+                    ? member.movement
+                    : (position.moving ? 'travelling' : 'stationary'),
             position: position,
+            place: member.place,
           )
         else
           member,

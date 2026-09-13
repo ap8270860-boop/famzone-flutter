@@ -340,13 +340,23 @@ class AppNotification {
 class NotificationAction {
   const NotificationAction({required this.kind, required this.id});
 
-  /// follow_request | family_invite
+  /// follow_request | family_invite | check_in_request
   final String kind;
 
-  /// The request or invite to respond to.
+  /// The request, invite or chain step to respond to.
   final String id;
 
   bool get isFollowRequest => kind == 'follow_request';
+
+  /// Somebody's daily check-in, waiting on this user's confirmation.
+  ///
+  /// The odd one out among these three: the other two stay actionable until
+  /// somebody answers them, while this one stops being actionable on its own
+  /// after half an hour, when the chain hands the request to the next person.
+  /// Nothing here has to know that — the server resolves the buttons from the
+  /// step's live status on every read — but it is why a row that had an
+  /// Accept button this morning may have none this afternoon.
+  bool get isCheckInRequest => kind == 'check_in_request';
 
   factory NotificationAction.fromJson(Map<String, dynamic> json) =>
       NotificationAction(

@@ -41,13 +41,25 @@ class _PlacesScreenState extends State<PlacesScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => PlaceEditorSheet(
+      /*
+       | The sheet's own context, kept.
+       |
+       | The delete button used to close the sheet itself, which meant it shut
+       | whether or not the confirmation was accepted — decline, and the
+       | editor vanished anyway. Now the button only asks, and closing is the
+       | caller's job, conditional on the delete having actually happened.
+       */
+      builder: (sheet) => PlaceEditorSheet(
         place: place,
         palette: MapPalette.night,
         onSave: _store.savePlace,
         onDelete: place.id.isEmpty
             ? null
-            : () => _confirmDelete(place),
+            : () async {
+                final removed = await _confirmDelete(place);
+
+                if (removed && sheet.mounted) Navigator.of(sheet).pop();
+              },
       ),
     );
   }
@@ -57,7 +69,7 @@ class _PlacesScreenState extends State<PlacesScreen> {
   /// "Are you sure?" is a question nobody reads. Naming the place and saying
   /// the notifications stop is the difference between a dialog people dismiss
   /// and one they answer.
-  Future<void> _confirmDelete(FamilyPlace place) async {
+  Future<bool> _confirmDelete(FamilyPlace place) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -87,7 +99,9 @@ class _PlacesScreenState extends State<PlacesScreen> {
       ),
     );
 
-    if (ok == true) await _store.deletePlace(place.id);
+    if (ok != true) return false;
+
+    return _store.deletePlace(place.id);
   }
 
   @override

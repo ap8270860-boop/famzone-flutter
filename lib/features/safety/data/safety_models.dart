@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'check_in_chain.dart';
+
 /// How the status reads. The server decides this, not the client — the app and
 /// the web dashboard must never disagree about what counts as safe.
 enum SafetyTone { positive, caution, critical }
@@ -61,12 +63,27 @@ class CheckInInfo {
     this.reminderLabel,
     this.note,
     this.recent = const [],
+    this.notify = NotifyList.empty,
+    this.chain,
   });
 
   final bool doneToday;
   final bool overdue;
   final int currentStreak;
   final int longestStreak;
+
+  /// Who a check-in will reach, and whether a list has been chosen at all.
+  ///
+  /// `notify.configured` is what the button keys off: false means the first
+  /// tap opens the picker instead of checking in.
+  final NotifyList notify;
+
+  /// Today's chain, once there is one.
+  ///
+  /// Null in two quite different situations — nothing checked in yet, and a
+  /// check-in made with nobody on the list — which the card does not have to
+  /// tell apart, because [doneToday] already does.
+  final CheckInChain? chain;
 
   /// The instant the check-in happened, in UTC.
   ///
@@ -113,8 +130,33 @@ class CheckInInfo {
               .map(CheckInDay.fromJson)
               .toList() ??
           const [],
+      notify: json['notify'] is Map<String, dynamic>
+          ? NotifyList.fromJson(json['notify'] as Map<String, dynamic>)
+          : NotifyList.empty,
+      chain: json['chain'] is Map<String, dynamic>
+          ? CheckInChain.fromJson(json['chain'] as Map<String, dynamic>)
+          : null,
     );
   }
+
+  /// Replace just the chain, leaving everything else alone.
+  ///
+  /// What a websocket frame does: somebody confirmed, so the chain changed and
+  /// nothing else did. Rebuilding the whole status from a frame that only
+  /// carries a chain would blank the streak and the week strip.
+  CheckInInfo withChain(CheckInChain? next) => CheckInInfo(
+        doneToday: doneToday,
+        overdue: overdue,
+        currentStreak: currentStreak,
+        longestStreak: longestStreak,
+        checkedInAt: checkedInAt,
+        serverCheckedInLabel: serverCheckedInLabel,
+        reminderLabel: reminderLabel,
+        note: note,
+        recent: recent,
+        notify: notify,
+        chain: next,
+      );
 }
 
 /// The whole safety picture: one payload behind both home-screen cards.
@@ -182,9 +224,28 @@ class SafetyStatus {
           for (final day in checkIn.recent)
             day.isToday ? day.copyWith(done: true) : day,
         ],
+
+        // Carried forward: who will be told is already known, and blanking it
+        // would make the row of faces flicker out and back on every tap.
+        notify: checkIn.notify,
+
+        // Deliberately left null. The chain does not exist until the server
+        // has created it, and guessing one here would draw a progress bar for
+        // notifications that may not have gone anywhere.
       ),
     );
   }
+
+  /// Fold a chain from a websocket frame into the status we are holding.
+  SafetyStatus withChain(CheckInChain? chain) => SafetyStatus(
+        state: state,
+        tone: tone,
+        headline: headline,
+        detail: detail,
+        circleTotal: circleTotal,
+        circleSafe: circleSafe,
+        checkIn: checkIn.withChain(chain),
+      );
 }
 
 /// Same shape as [CheckInInfo.checkedInLabel], for the optimistic copy that is

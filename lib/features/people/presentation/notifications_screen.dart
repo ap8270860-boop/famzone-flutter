@@ -132,7 +132,8 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
               ),
               const SizedBox(height: 6),
               const Text(
-                'Follow requests and family invites will show up here.',
+                'Follow requests, family invites and check-ins waiting on '
+                'you will show up here.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 12.5,
@@ -252,8 +253,20 @@ class _NotificationRow extends StatelessWidget {
             Row(
               children: [
                 Expanded(
+                  /*
+                   | A check-in gets more room than a follow request.
+                   |
+                   | Its labels say what the tap means rather than naming the
+                   | verb — "I know they are safe" instead of "Accept" — and
+                   | that sentence needs the space. The ratio is the only
+                   | thing that differs; the two buttons are otherwise the
+                   | same control everywhere in the app.
+                   */
+                  flex: action.isCheckInRequest ? 3 : 1,
                   child: _Btn(
-                    label: 'Accept',
+                    label: action.isCheckInRequest
+                        ? 'I know they are safe'
+                        : 'Accept',
                     filled: true,
                     busy: busy,
                     onTap: onAccept,
@@ -262,7 +275,10 @@ class _NotificationRow extends StatelessWidget {
                 const SizedBox(width: 9),
                 Expanded(
                   child: _Btn(
-                    label: 'Decline',
+                    // "Pass on", not "Decline". Handing the request to the
+                    // next person immediately is a helpful act, and a word
+                    // that reads as a refusal stops people doing it.
+                    label: action.isCheckInRequest ? 'Pass on' : 'Decline',
                     filled: false,
                     busy: busy,
                     onTap: onDecline,
