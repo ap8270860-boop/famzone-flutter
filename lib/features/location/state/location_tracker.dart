@@ -515,12 +515,227 @@ class LocationTracker extends ChangeNotifier {
     return _moving;
   }
 
+  /*
+  |----------------------------------------------------------------------------
+  | Which fixes are allowed to move the dot
+  |----------------------------------------------------------------------------
+  */
+
+  /// Past this, whatever we are holding stops being authoritative.
+  ///
+  /// The escape hatch that stops [_accepts] from ever freezing the marker. A
+  /// person genuinely inside a building all afternoon may never produce a fix
+  /// good enough to beat the one they walked in with, and a dot pinned to the
+  /// doorway forever is worse than a coarse dot that moves. Long enough to
+  /// outlast the cold-lock window that causes the drift, short enough that no
+  /// real movement is held back by more than a fix or two.
+  static const double _holdSeconds = 45.0;
+
+  /*
+  | Two conditions, and a reading has to fail both before it is held back.
+  |
+  | Getting this wrong in the strict direction is worse than the bug being
+  | fixed. A dot that stops following somebody who is walking is precisely the
+  | complaint this screen has already had once, and a filter that treats every
+  | dip in accuracy as suspicious recreates it: step under a tree, accuracy
+  | goes from 10 m to 50 m, and the marker parks itself until the canopy ends.
+  |
+  | So the gate is aimed narrowly at readings that are not merely worse but
+  | *unusable*. A cell-tower position reports hundreds of metres of error; wifi
+  | reports tens; satellites report single figures. Only the first kind causes
+  | the drift, and only the first kind is stopped here.
+  */
+
+  /// How many times worse than what we hold before a reading is suspect.
+  static const double _worseFactor = 3.0;
+
+  /// ...and how coarse it has to be in absolute terms as well.
+  ///
+  /// The floor is what protects ordinary walking. 10 m degrading to 50 m is
+  /// three times worse and would trip the factor alone — but 50 m is a normal
+  /// reading under trees, its displacements are real, and it is let straight
+  /// through. Nothing is held back until the phone itself admits to being more
+  /// than this far out.
+  static const double _uselessAboveM = 75.0;
+
+  /// Whether this reading is allowed to replace the one on screen.
+  ///
+  /// This exists because of a specific and very confusing bug: open the map
+  /// standing still, and the marker would slide away for a few seconds and
+  /// then come back.
+  ///
+  /// Nothing was moving. What happens on a cold start is that the phone
+  /// answers immediately from whatever it has — cell towers, wifi — while the
+  /// GPS is still finding satellites. That first reading can be hundreds of
+  /// metres out and *says so*, reporting an accuracy of 500 m or more. The old
+  /// code took it anyway, the marker glided off to it, and then the real
+  /// satellite fix landed back where the person had been standing all along.
+  ///
+  /// The rule is not "prefer accurate fixes" — that would pin the dot to a
+  /// good reading and refuse to follow somebody who actually walked away.
+  /// It is narrower:
+  ///
+  /// > reject a fix whose claimed movement is smaller than its own margin of
+  /// > error, when it is meaningfully less certain than what we already have.
+  ///
+  /// A 500 m-accurate reading 200 m from a 10 m-accurate one is not evidence
+  /// of 200 m of travel. It is the same place, measured badly, and the honest
+  /// reading of it is "no new information". Move 600 m on that same coarse
+  /// fix, though, and the jump exceeds what the error can explain — so it is
+  /// real, and it is taken.
+  ///
+  /// Deliberately applied to the upload buffer as well. A reading not good
+  /// enough to move your own dot is not good enough to tell your family you
+  /// have gone somewhere, and it would leave a spurious two-kilometre spike in
+  /// the day's journey history.
+  bool _accepts(Position candidate) {
+    final held = _mine;
+
+    // Nothing to compare against. The first reading of a session always wins,
+    // however coarse — an approximate dot beats an empty map.
+    if (held == null || !held.hasFix) return true;
+
+    final lat = held.latitude;
+    final lng = held.longitude;
+    final heldAccuracy = held.accuracy;
+
+    if (lat == null || lng == null || heldAccuracy == null) return true;
+
+    /*
+     | The ordinary path, and the cheap one.
+     |
+     | Almost every reading in a healthy session leaves here: it is better than
+     | what we hold, or no worse in a way that matters, or coarse but still
+     | within the range where its displacements mean something.
+     */
+    if (candidate.accuracy <= heldAccuracy * _worseFactor ||
+        candidate.accuracy <= _uselessAboveM) {
+      return true;
+    }
+
+    final heldAt = held.recordedAt;
+
+    /*
+     | Negative ages fall through rather than short-circuiting.
+     |
+     | A candidate older than what we hold — the last-known fallback inside
+     | currentFix can produce one — simply fails this test and is judged on
+     | displacement instead. That way a clock oddity can never wedge the
+     | marker.
+     */
+    if (heldAt != null &&
+        candidate.timestamp.difference(heldAt).inMilliseconds / 1000.0 >=
+            _holdSeconds) {
+      return true;
+    }
+
+    final moved = Geolocator.distanceBetween(
+      lat,
+      lng,
+      candidate.latitude,
+      candidate.longitude,
+    );
+
+    // Unusable, and recent enough that we have something better. Only a jump
+    // bigger than its own error is telling us something the error cannot
+    // explain.
+    return moved > candidate.accuracy;
+  }
+
+  bool _corrected = false;
+
+  /// Whether the reading now on screen *corrected* the last one rather than
+  /// following it.
+  ///
+  /// The map uses this to decide whether to animate. A marker sliding across
+  /// the screen means "this person travelled"; when what actually happened is
+  /// that the satellites finally answered and the previous guess was wrong,
+  /// sliding tells the viewer something false — and on the very first fix of a
+  /// session, where [_accepts] has nothing to compare against and must take
+  /// whatever the phone offers, that slide is the last remaining way the drift
+  /// can still be seen.
+  bool get myPositionCorrected => _corrected;
+
+  /// A better reading landing close enough that the old one's error explains
+  /// the whole distance.
+  ///
+  /// Both halves are needed. Improved accuracy alone is not a correction — you
+  /// can walk into open sky and get a better fix while genuinely having moved.
+  /// It is only a correction when the jump is inside what the *previous*
+  /// reading admitted it might be wrong by, because then there is no travel
+  /// left to explain.
+  bool _isCorrection(Position candidate) {
+    final held = _mine;
+
+    if (held == null || !held.hasFix) return false;
+
+    final lat = held.latitude;
+    final lng = held.longitude;
+    final heldAccuracy = held.accuracy;
+
+    if (lat == null || lng == null || heldAccuracy == null) return false;
+
+    // The mirror of [_accepts]: a correction is a reading arriving from the
+    // unusable side of those same two thresholds, not merely a tidier one.
+    // Walking out from under a tree improves accuracy without correcting
+    // anything, and that movement should still animate.
+    if (heldAccuracy <= candidate.accuracy * _worseFactor ||
+        heldAccuracy <= _uselessAboveM) {
+      return false;
+    }
+
+    final moved = Geolocator.distanceBetween(
+      lat,
+      lng,
+      candidate.latitude,
+      candidate.longitude,
+    );
+
+    return moved <= heldAccuracy;
+  }
+
+  /// The best reading we currently hold, in the shape the API and the camera
+  /// want.
+  ///
+  /// Exists so [currentFix] can answer with what is actually on screen rather
+  /// than with a one-shot that [_accepts] has just thrown away — otherwise the
+  /// camera flies to a coarse position while the marker stays put, which is
+  /// the same drift bug wearing a different hat.
+  LocationFix? _heldFix() {
+    final held = _mine;
+
+    if (held == null || !held.hasFix) return null;
+
+    final lat = held.latitude;
+    final lng = held.longitude;
+
+    if (lat == null || lng == null) return null;
+
+    return LocationFix(
+      latitude: lat,
+      longitude: lng,
+      recordedAt: held.recordedAt ?? DateTime.now(),
+      accuracy: held.accuracy,
+      speed: held.speed,
+      heading: held.heading,
+      moving: held.moving,
+      batteryLevel: held.batteryLevel ?? _batteryLevel,
+    );
+  }
+
   /// Set the local dot from a raw position, without going near the buffer.
   ///
   /// Used by the one-shot and last-known paths, which have no business
   /// queueing anything for upload — they exist purely so the map has
   /// something to draw immediately.
   void _adopt(Position position) {
+    // Gated like every other write to [_mine]. The one-shot path is a common
+    // source of coarse readings: getCurrentPosition falls back to the last
+    // known position when a fresh lock times out indoors.
+    if (!_accepts(position)) return;
+
+    _corrected = _isCorrection(position);
+
     _mine = LivePosition(
       userId: Session.instance.user?.id ?? '',
       hasFix: true,
@@ -559,6 +774,20 @@ class LocationTracker extends ChangeNotifier {
 
   void _onFix(Position position) {
     _refreshBattery();
+
+    /*
+     | Before anything else, including the movement verdict.
+     |
+     | A rejected reading must not become the anchor [_isMoving] measures the
+     | next twenty seconds against — anchoring on a cell-tower position is how
+     | a stationary phone talks itself onto the five-second plan and flattens
+     | its battery walking nowhere.
+     */
+    if (!_accepts(position)) return;
+
+    // Worked out against the reading this is about to replace, so it has to be
+    // read before [_mine] is overwritten below.
+    _corrected = _isCorrection(position);
 
     final moving = _isMoving(position);
 
@@ -703,7 +932,7 @@ class LocationTracker extends ChangeNotifier {
 
     position ??= await Geolocator.getLastKnownPosition();
 
-    if (position == null) return null;
+    if (position == null) return _heldFix();
 
     /*
      | Prime the local dot from this one-shot.
@@ -713,22 +942,36 @@ class LocationTracker extends ChangeNotifier {
      | the single most confusing thing this screen did. A one-shot or even a
      | last-known fix is a perfectly good answer to "where am I" until the
      | stream produces a better one.
+     |
+     | Gated, so a coarse one-shot cannot displace a better reading — see
+     | [_accepts].
      */
     _adopt(position);
 
-    return LocationFix(
-      latitude: position.latitude,
-      longitude: position.longitude,
-      recordedAt: position.timestamp,
-      accuracy: position.accuracy,
-      speed: position.speed < 0 ? null : position.speed,
-      heading: position.heading >= 0 ? position.heading : null,
+    /*
+     | Answer with what is on screen, not with the raw reading.
+     |
+     | The two are the same thing whenever the gate accepted this position. When
+     | it did not, they differ, and this is the line that matters: every caller
+     | of currentFix either moves the camera to it or opens a share with it, and
+     | both must agree with the marker. Returning the rejected reading would fly
+     | the camera to a cell-tower position while the dot stayed where it was —
+     | the drift bug again, one layer up.
+     */
+    return _heldFix() ??
+        LocationFix(
+          latitude: position.latitude,
+          longitude: position.longitude,
+          recordedAt: position.timestamp,
+          accuracy: position.accuracy,
+          speed: position.speed < 0 ? null : position.speed,
+          heading: position.heading >= 0 ? position.heading : null,
 
-      // A one-off fix has nothing to compare against, so the sensor is all
-      // there is. It is only the opening fix of a share; the stream corrects
-      // it within seconds.
-      moving: position.speed > _movingSpeedMs,
-      batteryLevel: _batteryLevel,
-    );
+          // A one-off fix has nothing to compare against, so the sensor is all
+          // there is. It is only the opening fix of a share; the stream
+          // corrects it within seconds.
+          moving: position.speed > _movingSpeedMs,
+          batteryLevel: _batteryLevel,
+        );
   }
 }

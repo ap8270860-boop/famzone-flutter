@@ -102,6 +102,53 @@ dependencies:
   # and iOS alike.
   battery_plus: ^6.2.1
 
+  # Reminders.
+  #
+  # flutter_local_notifications registers real OS alarms, which is the
+  # whole reason reminders work with no signal, on a plane, and with the
+  # app force-closed. Nothing about the moment a reminder rings touches
+  # the network — the server owns what the reminders are, the phone owns
+  # when they go off.
+  #
+  # timezone is not optional alongside it. zonedSchedule takes a
+  # TZDateTime, and without initializeTimeZones plus an explicit
+  # setLocalLocation the library treats every schedule as UTC. The
+  # failure is quiet and seasonal: alarms land at the right instant in
+  # the wrong zone, so a 7am reminder rings at 12:30pm in India and
+  # nothing in the logs says why.
+  #
+  # flutter_timezone was already here for the check-in's local day and
+  # supplies the IANA name that setLocalLocation needs.
+  #
+  # No permission_handler, still. flutter_local_notifications asks for
+  # notifications and for the Android 12+ exact-alarm permission through
+  # its own platform implementations, so a second permissions plugin
+  # would be two sources of truth for one answer.
+  #
+  # ^19.5.0 and not ^22, deliberately, and the caret is capped by the
+  # major so pub cannot drift past it.
+  #
+  # v20 converted every positional parameter on initialize(), show(),
+  # cancel() and zonedSchedule() to named parameters. The changelog
+  # names the affected methods and does not publish the new parameter
+  # spellings, so writing against 22 means guessing at four signatures —
+  # and a guess that is wrong does not degrade, it fails to compile.
+  # 19.5.0 is the last release this code is written against and known
+  # correct for.
+  #
+  # Upgrading later is a contained job: reminder_scheduler.dart is the
+  # only file that touches this package, and the only changes are
+  # turning four call sites into named arguments. 21.0.0 also raises the
+  # floor to Flutter 3.38.1 / Dart 3.10 and Android API 24 — this
+  # project is on Flutter 3.47 with minSdk 24, so that part already
+  # holds.
+  #
+  # timezone ^0.10.0 is what 19.5.0 itself depends on. Pinned to the
+  # same range rather than guessed: 22.x moved to ^0.11.0, and a
+  # mismatch here is a resolution failure rather than a runtime one.
+  flutter_local_notifications: ^19.5.0
+  timezone: ^0.10.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

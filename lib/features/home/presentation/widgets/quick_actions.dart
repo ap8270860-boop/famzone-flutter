@@ -24,11 +24,19 @@ class QuickActions extends StatelessWidget {
       'Live Location',
       Icons.location_on_rounded,
     ),
+    /*
+     | Reminders, where Audio Detect used to be.
+     |
+     | The artwork does not exist yet and that is fine — `errorBuilder` below
+     | falls back to the gradient icon, so this tile looks deliberate rather
+     | than broken until a reminder.png is dropped into assets/icons/. Nothing
+     | else needs to change when it lands.
+     */
     (
-      'audio',
-      'assets/icons/audio-detect.png',
-      'Audio Detect',
-      Icons.hearing_rounded,
+      'reminder',
+      'assets/icons/reminder.png',
+      'Reminders',
+      Icons.notifications_active_rounded,
     ),
     (
       'circle',

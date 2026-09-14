@@ -10,6 +10,9 @@ import '../../people/presentation/search_people_screen.dart';
 import '../../people/presentation/user_profile_screen.dart';
 import '../../people/state/family_store.dart';
 import '../../people/state/notification_store.dart';
+import '../../reminders/presentation/reminders_screen.dart';
+import '../../reminders/presentation/widgets/reminder_score_card.dart';
+import '../../reminders/state/reminder_store.dart';
 import '../../safety/presentation/check_in_contacts_sheet.dart';
 import '../../safety/presentation/widgets/incoming_check_in_card.dart';
 import '../../safety/state/safety_store.dart';
@@ -54,6 +57,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
     FamilyStore.instance.load();
     NotificationStore.instance.refreshBadge();
+
+    /*
+     | Loading reminders here does more than fill a card.
+     |
+     | load() drains the outbox and re-registers the OS alarms, so opening the
+     | app is what keeps the rolling schedule topped up — and the home screen
+     | is the one place somebody reliably lands. Leaving it to the reminders
+     | screen would mean the alarms only survive for people who visit it.
+     */
+    ReminderStore.instance.load();
+    ReminderStore.instance.loadScore();
   }
 
   void _openSearch() {
@@ -80,6 +94,13 @@ class _HomeScreenState extends State<HomeScreen> {
       case 'circle':
         Navigator.of(context).push(
           MaterialPageRoute(builder: (_) => const LiveMapScreen()),
+        );
+
+        return;
+
+      case 'reminder':
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => const RemindersScreen()),
         );
 
         return;
@@ -216,6 +237,8 @@ class _HomeScreenState extends State<HomeScreen> {
       SafetyStore.instance.loadIncoming(),
       FamilyStore.instance.load(),
       NotificationStore.instance.refreshBadge(),
+      ReminderStore.instance.load(),
+      ReminderStore.instance.loadScore(),
     ]);
   }
 
@@ -230,6 +253,7 @@ class _HomeScreenState extends State<HomeScreen> {
         SafetyStore.instance,
         FamilyStore.instance,
         NotificationStore.instance,
+        ReminderStore.instance,
       ]),
       builder: (context, _) => _build(context),
     );
@@ -306,6 +330,28 @@ class _HomeScreenState extends State<HomeScreen> {
                 onCheckIn: _checkIn,
                 onEditContacts: () => _chooseContacts(),
               ),
+
+              /*
+               | Only once there is something to show.
+               |
+               | A card explaining a feature nobody has adopted is an advert,
+               | and the quick action above is already the way in.
+               */
+              if (ReminderStore.instance.today.due > 0 ||
+                  ReminderStore.instance.reminders.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                ReminderScoreCard(
+                  today: ReminderStore.instance.today,
+                  score: ReminderStore.instance.score,
+                  pendingAssignments: ReminderStore.instance.pendingCount,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const RemindersScreen(),
+                    ),
+                  ),
+                ),
+              ],
+
               const SizedBox(height: 24),
 
               _SectionHeader(

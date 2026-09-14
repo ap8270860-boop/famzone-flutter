@@ -33,6 +33,25 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        /*
+         | Core library desugaring, required by flutter_local_notifications.
+         |
+         | The plugin uses java.time to schedule alarms, and java.time only
+         | exists natively from Android 8.0 (API 26). This app's minSdk is 24,
+         | so on 24 and 25 those classes are simply not there — desugaring is
+         | what back-ports them into the APK.
+         |
+         | Without it the build fails at checkDebugAarMetadata rather than at
+         | runtime, which is the good outcome: the alternative would be an app
+         | that installs on a 2016 phone and crashes the moment somebody sets
+         | a reminder.
+         |
+         | Raising minSdk to 26 would also fix it and is the wrong trade — it
+         | would drop Android 7 devices, which are exactly the older, cheaper
+         | phones a family safety app should still run on.
+         */
+        isCoreLibraryDesugaringEnabled = true
+
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -72,6 +91,27 @@ kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
+}
+
+/*
+ | The other half of core library desugaring.
+ |
+ | Turning the flag on above is not enough — it tells AGP to rewrite the
+ | bytecode, and this supplies the back-ported java.time classes it rewrites
+ | calls into. Setting one without the other fails the build, which is at
+ | least honest about it.
+ |
+ | 2.1.4 is the version flutter_local_notifications documents. Pinned exactly
+ | rather than left to a range: this library is stitched into the bytecode of
+ | every class that touches a date, and it is not somewhere for a build to
+ | drift on its own.
+ |
+ | No multiDexEnabled, despite the plugin's README showing it. That flag
+ | matters below API 21; this app's minSdk is 24, where multidex is native and
+ | the flag does nothing.
+ */
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
 flutter {

@@ -298,7 +298,15 @@ class _LiveMapScreenState extends State<LiveMapScreen>
     if (mine != null && mine.hasFix) {
       seen.add(_meKey);
 
-      _retarget(_meKey, LatLng(mine.latitude!, mine.longitude!), now);
+      _retarget(
+        _meKey,
+        LatLng(mine.latitude!, mine.longitude!),
+        now,
+        // Only ever true for our own marker: the tracker is the only source
+        // that knows the accuracy of the reading it just replaced. Family
+        // positions arrive from the server already settled.
+        snap: _tracker.myPositionCorrected,
+      );
 
       _want(
         id: _meKey,
@@ -358,7 +366,9 @@ class _LiveMapScreenState extends State<LiveMapScreen>
         theirs.ageLabel;
   }
 
-  void _retarget(String id, LatLng target, int nowMs) {
+  /// [snap] means the position was corrected rather than followed — put the
+  /// marker there, do not walk it there. See [LocationTracker.myPositionCorrected].
+  void _retarget(String id, LatLng target, int nowMs, {bool snap = false}) {
     final existing = _glides[id];
 
     if (existing == null) {
@@ -369,7 +379,7 @@ class _LiveMapScreenState extends State<LiveMapScreen>
       return;
     }
 
-    existing.retarget(target, nowMs);
+    existing.retarget(target, nowMs, snap: snap);
   }
 
   /// Note the appearance a marker should have, and paint it if it is new.
@@ -1394,8 +1404,30 @@ class _Glide {
   /// makes a stationary marker shiver.
   static const double _minMoveDegrees = 0.000012; // ~1.3 metres
 
-  void retarget(LatLng next, int nowMs) {
+  void retarget(LatLng next, int nowMs, {bool snap = false}) {
     if (_near(_to, next)) {
+      _lastFixMs = nowMs;
+
+      return;
+    }
+
+    /*
+     | A correction is not a journey.
+     |
+     | Every other retarget here portrays travel, and animating it is the whole
+     | point. This one portrays the phone changing its mind — the satellites
+     | answered and the earlier guess was wrong — and walking the marker across
+     | that distance says "they moved" about somebody standing still.
+     |
+     | So it lands. _from and _to are set to the same point and the clock is
+     | already spent, which leaves valueAt returning the new position from the
+     | very next frame.
+     */
+    if (snap) {
+      _from = next;
+      _to = next;
+      _startMs = nowMs;
+      _durationMs = 1;
       _lastFixMs = nowMs;
 
       return;

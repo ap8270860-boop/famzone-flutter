@@ -43,6 +43,42 @@
          never there. -->
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
+    <!-- Reminders.
+
+         POST_NOTIFICATIONS is a runtime permission from Android 13 on.
+         Declaring it does not request it; the app asks when somebody saves
+         their first reminder, rather than at launch — a notification prompt
+         on a safety app's first run, before anything has explained why, is a
+         prompt people decline, and that is very hard to come back from.
+
+         SCHEDULE_EXACT_ALARM and USE_EXACT_ALARM are both declared, and they
+         are not alternatives:
+
+           SCHEDULE_EXACT_ALARM is the general one. On Android 13 it is
+           granted by default; on 14 and up it is denied by default and the
+           user has to allow it in Settings. The app asks, and falls back to
+           inexact delivery if refused.
+
+           USE_EXACT_ALARM is the exemption for apps whose core purpose is
+           alarms and reminders — granted automatically, no prompt. Play
+           Store review does check that claim, so it belongs to a reminder
+           feature and would not belong to, say, a shopping app.
+
+         Without either, zonedSchedule with exactAllowWhileIdle throws, and
+         inexact delivery can drift by fifteen minutes or more. Fine for
+         "read a book"; not fine for medicine.
+
+         RECEIVE_BOOT_COMPLETED is the one most easily forgotten and the most
+         damaging to miss. Android drops every scheduled alarm when the phone
+         restarts. Without this permission and the receiver below, a reminder
+         set on Monday silently stops existing the next time the phone is
+         rebooted — and nothing anywhere says so. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
+
     <!-- So the phone is not woken constantly on a device with no GPS at all
          (a tablet, an emulator) — the feature is declared optional rather
          than required, which also keeps the app installable on them. -->
@@ -105,6 +141,45 @@
         <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="${MAPS_API_KEY}"/>
+
+        <!-- Reminders: the receivers flutter_local_notifications needs.
+
+             These do not merge in from the plugin's own manifest, and the
+             failure when they are missing is completely silent.
+
+             ScheduledNotificationReceiver is what actually shows a scheduled
+             notification when its alarm fires.
+
+             ScheduledNotificationBootReceiver is what puts every pending
+             alarm back after a restart. Android clears them all on boot, so
+             without this a phone that reboots overnight wakes up with no
+             reminders and no indication that anything was lost — the single
+             worst way this feature can fail, because the person only finds
+             out by missing something.
+
+             ActionBroadcastReceiver handles taps on notification action
+             buttons, which is where Done and Snooze will live. -->
+        <receiver
+            android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>
+
+        <receiver
+            android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                <!-- HTC and some Xiaomi builds send only these. Harmless
+                     everywhere else, and the difference between reminders
+                     surviving a reboot and not on a good number of phones. -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"/>
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
