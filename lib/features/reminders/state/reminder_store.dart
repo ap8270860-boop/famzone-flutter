@@ -187,13 +187,32 @@ class ReminderStore extends ChangeNotifier {
       }
     } on ApiException catch (e) {
       _error = e.message;
-    } catch (_) {
+      _fault = 'api: ${e.message}';
+    } catch (e) {
+      /*
+       | The message stays friendly; the cause does not get thrown away.
+       |
+       | This catch sits around the parsing as well as the call, so a single
+       | mistyped field anywhere in the payload lands here looking exactly like
+       | a dead network — and, worse, skips _reschedule on the way out, so the
+       | visible symptom is a phone that never rings rather than a screen that
+       | says something went wrong. Keeping the real text is the difference
+       | between a five-minute fix and an evening.
+       */
       _error = 'Could not reach the server.';
+      _fault = '$e';
+
+      debugPrint('[reminders] load failed: $e');
     } finally {
       _loading = false;
       notifyListeners();
     }
   }
+
+  /// The real reason the last load failed, unprettified, for diagnostics.
+  String? _fault;
+
+  String? get fault => _fault;
 
   Future<void> loadScore({int days = 30}) async {
     try {

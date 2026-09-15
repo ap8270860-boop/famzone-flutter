@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../../../core/theme/app_colors.dart';
+import '../../state/reminder_scheduler.dart';
+import '../../state/reminder_store.dart';
 
 /// Why a reminder might not go off, and what to do about it.
 ///
@@ -136,6 +139,8 @@ class AlarmHealthSheet extends StatelessWidget {
               padding: EdgeInsets.fromLTRB(20, 6, 20, 24 + media.viewPadding.bottom),
               shrinkWrap: true,
               children: [
+                const _SelfTest(),
+                const SizedBox(height: 18),
                 for (final (brand, how) in _steps) ...[
                   _Step(brand: brand, how: how),
                   const SizedBox(height: 10),
@@ -154,6 +159,265 @@ class AlarmHealthSheet extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Two taps that say where the chain is broken.
+///
+/// The OEM instructions below are advice; this is evidence. It reads the state
+/// the scheduler is actually in, and offers the two calls that separate the
+/// three things that all look identical from the outside — a notification that
+/// cannot be posted, one that cannot be scheduled, and a scheduler that was
+/// never given anything to schedule.
+class _SelfTest extends StatefulWidget {
+  const _SelfTest();
+
+  @override
+  State<_SelfTest> createState() => _SelfTestState();
+}
+
+class _SelfTestState extends State<_SelfTest> {
+  final ReminderScheduler _scheduler = ReminderScheduler.instance;
+
+  String _result = '';
+  bool _bad = false;
+  bool _busy = false;
+  List<PendingNotificationRequest> _held = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final held = await _scheduler.pending();
+
+    if (!mounted) return;
+
+    setState(() => _held = held);
+  }
+
+  Future<void> _run(Future<String> Function() call, String okText) async {
+    if (_busy) return;
+
+    setState(() {
+      _busy = true;
+      _result = '';
+    });
+
+    final error = await call();
+
+    if (!mounted) return;
+
+    setState(() {
+      _busy = false;
+      _bad = error.isNotEmpty;
+      _result = error.isEmpty ? okText : error;
+    });
+
+    await _refresh();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = ReminderStore.instance;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 13, 14, 14),
+      decoration: BoxDecoration(
+        color: AppColors.canvas.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: AppColors.textMuted.withValues(alpha: 0.16),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Self-test',
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w700,
+              color: AppColors.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 3),
+          const Text(
+            'Ring now checks that this phone can show our notification at '
+            'all. Ring in 60s checks that it can schedule one. Close the app '
+            'after tapping the second.',
+            style: TextStyle(
+              fontSize: 11.5,
+              height: 1.45,
+              color: AppColors.textMuted,
+            ),
+          ),
+          const SizedBox(height: 11),
+          Row(
+            children: [
+              Expanded(
+                child: _TestButton(
+                  label: 'Ring now',
+                  busy: _busy,
+                  onTap: () => _run(
+                    _scheduler.ringNow,
+                    'Posted. If nothing appeared, notifications are blocked.',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: _TestButton(
+                  label: 'Ring in 60s',
+                  busy: _busy,
+                  onTap: () => _run(
+                    _scheduler.ringSoon,
+                    'Scheduled for 60 seconds from now. Close the app.',
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (_result.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              _result,
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.45,
+                color: _bad ? AppColors.alertRed : AppColors.emerald,
+              ),
+            ),
+          ],
+          const SizedBox(height: 13),
+          _Line('Timezone', _scheduler.zoneName),
+          _Line('Exact alarms', _scheduler.exactAlarmsAllowed ? 'yes' : 'no'),
+          _Line('Held by the OS', '${_held.length}'),
+          if (store.fault != null) _Line('Last load error', store.fault!),
+          const SizedBox(height: 8),
+          const Text(
+            'Last sync',
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
+              color: AppColors.textMuted,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            _scheduler.report,
+            style: const TextStyle(
+              fontSize: 11,
+              height: 1.5,
+              fontFamily: 'monospace',
+              color: AppColors.textMuted,
+            ),
+          ),
+          if (_held.isNotEmpty) ...[
+            const SizedBox(height: 9),
+            const Text(
+              'Next alarms',
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
+                color: AppColors.textMuted,
+              ),
+            ),
+            const SizedBox(height: 3),
+            for (final row in _held.take(6))
+              Text(
+                '${row.id}  ${row.title ?? ''}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11,
+                  height: 1.45,
+                  fontFamily: 'monospace',
+                  color: AppColors.textMuted,
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _Line extends StatelessWidget {
+  const _Line(this.label, this.value);
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 106,
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 11.5,
+                color: AppColors.textMuted,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(
+                fontSize: 11.5,
+                fontFamily: 'monospace',
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TestButton extends StatelessWidget {
+  const _TestButton({
+    required this.label,
+    required this.busy,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool busy;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: busy ? null : onTap,
+      child: Container(
+        height: 38,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: AppColors.electricBlue.withValues(alpha: busy ? 0.25 : 0.85),
+          borderRadius: BorderRadius.circular(9),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+          ),
+        ),
       ),
     );
   }

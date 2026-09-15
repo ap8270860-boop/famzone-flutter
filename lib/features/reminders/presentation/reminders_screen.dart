@@ -730,7 +730,10 @@ class _ExactAlarmWarning extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return GestureDetector(
+      onTap: () => AlarmHealthSheet.show(context),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
       padding: const EdgeInsets.fromLTRB(13, 12, 13, 12),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(14),
@@ -743,8 +746,12 @@ class _ExactAlarmWarning extends StatelessWidget {
           SizedBox(width: 11),
           Expanded(
             child: Text(
-              'Exact alarms are off, so reminders may arrive a few minutes '
-              'late. Turn on "Alarms & reminders" for SFamily in Settings.',
+              // No settings path named here on purpose. Where this lives —
+              // and whether it exists at all — differs by manufacturer and
+              // Android version, and sending somebody to hunt for a switch
+              // their phone does not have is worse than saying nothing.
+              'Reminders may arrive a few minutes late on this phone. '
+              'Tap for how to fix it.',
               style: TextStyle(
                 fontSize: 11.5,
                 height: 1.4,
@@ -753,6 +760,7 @@ class _ExactAlarmWarning extends StatelessWidget {
             ),
           ),
         ],
+      ),
       ),
     );
   }

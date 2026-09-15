@@ -169,6 +169,51 @@ class ReminderScheduler {
   bool _ready = false;
   bool _exactAllowed = true;
 
+  /// The last thing [sync] did, in words, for the diagnostics panel.
+  ///
+  /// Kept because every interesting failure here is silent: a reminder skipped
+  /// for not being accepted, a ring already in the past, an exception
+  /// swallowed so that one bad alarm does not take the rest down with it. None
+  /// of those reach the user, and without this the only symptom is a phone
+  /// that does not ring.
+  String _report = 'sync has not run yet';
+
+  String get report => _report;
+
+  /// True once [ensureReady] has finished at least once.
+  bool get isReady => _ready;
+
+  String _zoneNote = '';
+
+  /// The zone alarms are being scheduled in, and how it was arrived at.
+  ///
+  /// Worth showing plainly: if this reads UTC on a phone in India then the
+  /// zone lookup failed, and nothing else about the feature will make sense
+  /// until it is fixed.
+  String get zoneName =>
+      _ready ? '${tz.local.name}  ($_zoneNote)' : 'not initialised';
+
+  /// Tones that exist as `android/app/src/main/res/raw/<name>` and as
+  /// `<name>.caf` in the iOS bundle.
+  ///
+  /// Naming a raw resource that does not exist resolves to resource id 0,
+  /// which hands the channel a sound URI pointing at nothing — silent at best,
+  /// and on some OEM builds enough to stop the notification posting at all. So
+  /// this list is the guard: a tone not named here falls back to the phone's
+  /// own notification sound rather than to silence.
+  ///
+  /// Keep it in step with `android/app/src/main/res/raw/` and `assets/tones/`.
+  /// `default` and `silent` are not files and must never appear here.
+  static const Set<String> _bundledTones = <String>{
+    'gentle',
+    'chime',
+    'marimba',
+    'sunrise',
+    'bell',
+    'pulse',
+    'classic',
+  };
+
   /// Whether exact alarms are actually permitted.
   ///
   /// False means reminders still fire but may drift — worth saying out loud on
@@ -210,6 +255,39 @@ class ReminderScheduler {
   |----------------------------------------------------------------------------
   */
 
+  /// Re-read whether this phone will honour an exact alarm.
+  ///
+  /// `canScheduleExactNotifications` maps to AlarmManager.canScheduleExactAlarms,
+  /// which is true if the app holds EITHER the user-granted
+  /// SCHEDULE_EXACT_ALARM or the automatically-granted USE_EXACT_ALARM.
+  ///
+  /// This used to be inferred from the return value of
+  /// `requestExactAlarmsPermission()`, which answers a different question and
+  /// gets it wrong on exactly the phones where nothing is broken. An app that
+  /// declares USE_EXACT_ALARM — ours does — is granted the capability without
+  /// being asked, and Android then shows no "Alarms & reminders" toggle at
+  /// all. So the banner told people to go and turn on a switch that does not
+  /// exist on their phone, while their alarms were firing perfectly.
+  ///
+  /// Called on every sync, so the state corrects itself rather than waiting
+  /// for somebody to tap through the permission flow again.
+  Future<bool> refreshExactAlarms() async {
+    final android = _plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+
+    if (android == null) return _exactAllowed;
+
+    try {
+      // Null means the platform has no opinion — every Android below 12,
+      // where exact is the only behaviour there has ever been.
+      _exactAllowed = await android.canScheduleExactNotifications() ?? true;
+    } catch (_) {
+      _exactAllowed = true;
+    }
+
+    return _exactAllowed;
+  }
+
   /// Safe to call repeatedly; only the first call does anything.
   Future<void> ensureReady() async {
     if (_ready) return;
@@ -226,10 +304,28 @@ class ReminderScheduler {
     tzdata.initializeTimeZones();
 
     try {
-      final name = await FlutterTimezone.getLocalTimezone();
-      tz.setLocalLocation(tz.getLocation(name.toString()));
-    } catch (_) {
-      // Leaves tz.local as UTC. Better than throwing out of app start.
+      /*
+       | `.identifier`, not `.toString()`.
+       |
+       | flutter_timezone 5 returns a TimezoneInfo, not a String, and it mixes
+       | in Equatable — so toString() renders as "TimezoneInfo(Asia/Calcutta,
+       | null)". That is not a location name, getLocation throws on it, the
+       | catch below swallows the throw, and tz.local silently stays UTC.
+       |
+       | Every alarm is then scheduled at its wall-clock time *in UTC*: a
+       | reminder set for 18:30 registers for 18:30 UTC, which is midnight in
+       | India. Nothing errors, nothing is logged, and the phone simply never
+       | rings when it was asked to. This one line cost two evenings.
+       */
+      final info = await FlutterTimezone.getLocalTimezone();
+
+      tz.setLocalLocation(tz.getLocation(info.identifier));
+
+      _zoneNote = info.identifier;
+    } catch (e) {
+      // tz.local stays UTC. Recorded rather than swallowed, and _wall below
+      // keeps the instants right regardless.
+      _zoneNote = 'unresolved, using the device clock: $e';
     }
 
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -334,16 +430,23 @@ class ReminderScheduler {
       final granted = await android.requestNotificationsPermission() ?? false;
 
       /*
-       | Exact alarms are a second, separate permission on Android 12+.
+       | Exact alarms are a second, separate permission on Android 12+ — but
+       | only on some phones, which is the part that matters.
        |
-       | Asked for after notifications, and a refusal is not fatal: the
-       | reminder still fires, just inexactly. Recorded so the UI can say so.
+       | Ask the read-only question first and only prompt if the answer is no.
+       | An app declaring USE_EXACT_ALARM is granted the capability outright
+       | and Android shows no "Alarms & reminders" toggle at all, so prompting
+       | there opens a screen that does not exist.
        */
-      try {
-        _exactAllowed =
-            await android.requestExactAlarmsPermission() ?? _exactAllowed;
-      } catch (_) {
-        _exactAllowed = false;
+      if (!await refreshExactAlarms()) {
+        try {
+          await android.requestExactAlarmsPermission();
+        } catch (_) {
+          // No such settings screen on this device. Not fatal — the re-check
+          // below is what decides, not this call.
+        }
+
+        await refreshExactAlarms();
       }
 
       return granted;
@@ -380,10 +483,23 @@ class ReminderScheduler {
   Future<int> sync(List<Reminder> reminders, List<ScheduledRing> rings) async {
     await ensureReady();
 
+    // Re-read rather than trust the flag. It may have been knocked to false by
+    // an unrelated scheduling failure, or the user may have granted the
+    // permission in Settings since the last run — either way the banner should
+    // correct itself here rather than stay wrong until the app restarts.
+    await refreshExactAlarms();
+
     await _plugin.cancelAll();
 
     final now = DateTime.now();
     var scheduled = 0;
+
+    // Counted only so the diagnostics panel can say which branch swallowed a
+    // reminder. Every one of these is a silent skip in normal running.
+    var mute = 0;
+    var past = 0;
+    var failed = 0;
+    String? firstError;
 
     /*
      | Repeating alarms first, because they are the ones that never run out.
@@ -398,7 +514,11 @@ class ReminderScheduler {
 
     for (final reminder in reminders) {
       if (scheduled >= _budget) break;
-      if (!reminder.shouldRing) continue;
+
+      if (!reminder.shouldRing) {
+        mute++;
+        continue;
+      }
 
       final handled = await _scheduleRepeating(reminder);
 
@@ -419,7 +539,10 @@ class ReminderScheduler {
 
       // Already gone. Not an error — the list was built a moment ago on a
       // server whose clock is not this one.
-      if (!at.isAfter(tz.TZDateTime.from(now, tz.local))) continue;
+      if (!at.isAfter(tz.TZDateTime.from(now, tz.local))) {
+        past++;
+        continue;
+      }
 
       try {
         await _plugin.zonedSchedule(
@@ -455,12 +578,114 @@ class ReminderScheduler {
          | once. Drop to inexact for the remainder and carry on.
          */
         _exactAllowed = false;
+        failed++;
+        firstError ??= '$e';
 
         debugPrint('reminder schedule failed for ${ring.reminderId}: $e');
       }
     }
 
+    final held = await _plugin.pendingNotificationRequests();
+
+    _report = [
+      '${reminders.length} reminders in, ${rings.length} rings in',
+      '$scheduled scheduled, ${held.length} now held by the OS',
+      if (mute > 0) '$mute skipped: not accepted or paused',
+      if (past > 0) '$past skipped: already in the past',
+      if (failed > 0) '$failed failed: $firstError',
+      'zone $zoneName, exact ${_exactAllowed ? 'yes' : 'no'}',
+    ].join('\n');
+
+    debugPrint('[reminders] $_report');
+
     return scheduled;
+  }
+
+  /*
+  |----------------------------------------------------------------------------
+  | Self-test
+  |----------------------------------------------------------------------------
+  |
+  | Two buttons that between them say where the chain is broken, without
+  | needing a cable or a log.
+  |
+  |   ringNow fails          -> the notification itself cannot be posted:
+  |                             permission, channel, or launcher icon.
+  |   ringNow works,
+  |   ringSoon never arrives -> posting is fine, scheduling is not: exact
+  |                             alarms, or an OEM battery manager.
+  |   both work, real
+  |   reminders still silent -> the fault is upstream, in what sync is being
+  |                             handed. The report above says what that was.
+  |
+  | Both return an empty string on success and the platform's own error text
+  | otherwise, because the error text is the whole point.
+  */
+
+  /// Post a notification this instant, bypassing scheduling entirely.
+  Future<String> ringNow() async {
+    try {
+      await ensureReady();
+
+      await _plugin.show(
+        _selfTestId,
+        'SFamily self-test',
+        'If you can see this, notifications work on this phone.',
+        _detailsFor(_selfTestRing()),
+      );
+
+      return '';
+    } catch (e) {
+      return '$e';
+    }
+  }
+
+  /// Schedule one notification a short way out, through the same call every
+  /// real reminder uses.
+  Future<String> ringSoon({Duration after = const Duration(seconds: 60)}) async {
+    try {
+      await ensureReady();
+
+      final at = tz.TZDateTime.now(tz.local).add(after);
+
+      await _plugin.zonedSchedule(
+        _selfTestId + 1,
+        'SFamily self-test',
+        'Scheduled for ${at.hour.toString().padLeft(2, '0')}:'
+            '${at.minute.toString().padLeft(2, '0')}:'
+            '${at.second.toString().padLeft(2, '0')}.',
+        at,
+        _detailsFor(_selfTestRing()),
+        androidScheduleMode: _exactAllowed
+            ? AndroidScheduleMode.exactAllowWhileIdle
+            : AndroidScheduleMode.inexactAllowWhileIdle,
+      );
+
+      return '';
+    } catch (e) {
+      return '$e';
+    }
+  }
+
+  /// Well outside the hashed range real reminders use.
+  static const int _selfTestId = 2147483600;
+
+  ScheduledRing _selfTestRing() => ScheduledRing(
+        reminderId: 'self-test',
+        at: DateTime.now(),
+        local: '',
+        title: 'SFamily self-test',
+        body: null,
+        ringtone: 'default',
+        vibrate: true,
+        snoozeMinutes: 0,
+      );
+
+  /// Everything the OS is holding for us, for the diagnostics panel.
+  Future<List<PendingNotificationRequest>> pending() async {
+    await ensureReady();
+
+    return _plugin.pendingNotificationRequests();
   }
 
   /*
@@ -560,10 +785,9 @@ class ReminderScheduler {
   /// adding a duration across a daylight-saving boundary lands an hour out,
   /// which is exactly the bug this whole feature keeps having to avoid.
   tz.TZDateTime _firstDaily(Reminder reminder) {
-    final now = tz.TZDateTime.now(tz.local);
+    final now = DateTime.now();
 
-    var at = tz.TZDateTime(
-      tz.local,
+    var at = DateTime(
       now.year,
       now.month,
       now.day,
@@ -573,8 +797,7 @@ class ReminderScheduler {
 
     if (!at.isAfter(now)) {
       // Day overflow normalises, so the 31st rolls into the 1st on its own.
-      at = tz.TZDateTime(
-        tz.local,
+      at = DateTime(
         now.year,
         now.month,
         now.day + 1,
@@ -588,10 +811,9 @@ class ReminderScheduler {
 
   /// The next occurrence of one weekday at this reminder's time.
   tz.TZDateTime _firstWeekly(Reminder reminder, int isoWeekday) {
-    final now = tz.TZDateTime.now(tz.local);
+    final now = DateTime.now();
 
-    var at = tz.TZDateTime(
-      tz.local,
+    var at = DateTime(
       now.year,
       now.month,
       now.day,
@@ -604,8 +826,7 @@ class ReminderScheduler {
     for (var step = 0; step < 8; step++) {
       if (at.weekday == isoWeekday && at.isAfter(now)) break;
 
-      at = tz.TZDateTime(
-        tz.local,
+      at = DateTime(
         at.year,
         at.month,
         at.day + 1,
@@ -621,23 +842,22 @@ class ReminderScheduler {
   ///
   /// A reminder set up today to begin next Monday must not go off tonight.
   /// The repeat then continues from whenever the first one lands.
-  tz.TZDateTime _notBefore(tz.TZDateTime at, Reminder reminder) {
+  tz.TZDateTime _notBefore(DateTime at, Reminder reminder) {
     final starts = reminder.startsOn;
 
-    if (starts == null || starts.isEmpty) return at;
+    if (starts == null || starts.isEmpty) return _wall(at);
 
     final parts = starts.split('-');
 
-    if (parts.length != 3) return at;
+    if (parts.length != 3) return _wall(at);
 
     final year = int.tryParse(parts[0]);
     final month = int.tryParse(parts[1]);
     final day = int.tryParse(parts[2]);
 
-    if (year == null || month == null || day == null) return at;
+    if (year == null || month == null || day == null) return _wall(at);
 
-    final from = tz.TZDateTime(
-      tz.local,
+    final from = DateTime(
       year,
       month,
       day,
@@ -645,8 +865,20 @@ class ReminderScheduler {
       reminder.minute,
     );
 
-    return from.isAfter(at) ? from : at;
+    return _wall(from.isAfter(at) ? from : at);
   }
+
+  /// Turn a wall clock into the instant tz can schedule.
+  ///
+  /// The arithmetic above is done in plain [DateTime], which the Dart VM reads
+  /// in the phone's *real* zone — no plugin, no lookup, nothing that can fail.
+  /// This converts the resulting instant into whatever `tz.local` happens to
+  /// be, which keeps the alarm on the right instant even if the zone lookup in
+  /// [ensureReady] has failed and left `tz.local` at UTC.
+  ///
+  /// Belt and braces on purpose. The zone bug was invisible from inside the
+  /// app and cost days; this makes the same mistake impossible to repeat.
+  tz.TZDateTime _wall(DateTime local) => tz.TZDateTime.from(local, tz.local);
 
   String? _bodyOf(Reminder reminder) =>
       (reminder.note != null && reminder.note!.isNotEmpty)
@@ -760,7 +992,7 @@ class ReminderScheduler {
             day != null &&
             hour != null &&
             minute != null) {
-          return tz.TZDateTime(tz.local, year, month, day, hour, minute);
+          return _wall(DateTime(year, month, day, hour, minute));
         }
       }
     }
@@ -791,7 +1023,10 @@ class ReminderScheduler {
 
   NotificationDetails _detailsFor(ScheduledRing ring) {
     final silent = ring.ringtone == 'silent';
-    final custom = ring.ringtone != 'default' && !silent;
+
+    // Only a tone that is actually bundled. See [_bundledTones] — pointing at
+    // a raw resource that does not exist is worse than using the default.
+    final custom = !silent && _bundledTones.contains(ring.ringtone);
 
     return NotificationDetails(
       android: AndroidNotificationDetails(
@@ -853,7 +1088,9 @@ class ReminderScheduler {
         presentSound: !silent,
         // Bundled at build time. iOS will not play a file the app did not
         // ship, which is why the tone list is fixed rather than uploadable.
-        sound: custom ? '${ring.ringtone}.caf' : null,
+        // The same .wav files as Android — iOS accepts wav for notification
+        // sounds, so there is no reason to maintain a second set in .caf.
+        sound: custom ? '${ring.ringtone}.wav' : null,
         interruptionLevel: InterruptionLevel.timeSensitive,
 
         // Points at the category registered in ensureReady(). Without it the

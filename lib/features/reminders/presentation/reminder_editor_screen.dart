@@ -1,3 +1,4 @@
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/app_colors.dart';
@@ -120,11 +121,46 @@ class _ReminderEditorScreenState extends State<ReminderEditorScreen> {
         : TimeOfDay(hour: (now.hour + 1) % 24, minute: 0);
   }
 
+  /// Plays a tone when it is picked, so nobody has to save a reminder and wait
+  /// for it to fire to find out what they chose.
+  ///
+  /// One player, reused: tapping through six chips should replace the sound
+  /// each time, not stack six of them on top of each other.
+  final AudioPlayer _preview = AudioPlayer();
+
   @override
   void dispose() {
     _title.dispose();
     _note.dispose();
+    _preview.dispose();
     super.dispose();
+  }
+
+  /// Audition one tone.
+  ///
+  /// `default` is the phone's own notification sound and `silent` is nothing
+  /// at all — neither is a file we ship, so neither can be previewed. Saying
+  /// so is better than playing something that is not what will actually ring.
+  Future<void> _playTone(String tone) async {
+    await _preview.stop();
+
+    if (tone == 'default' || tone == 'silent') return;
+
+    try {
+      /*
+       | The `assets/` prefix is added by audioplayers itself, so the path
+       | here is relative to it: assets/tones/gentle.wav is 'tones/gentle.wav'.
+       | Passing the full path silently plays nothing.
+       */
+      await _preview.play(
+        AssetSource('tones/$tone.wav'),
+        volume: 1.0,
+      );
+    } catch (_) {
+      // A missing or unplayable file must not take the editor down with it.
+      // The chip stays selected; the reminder will still ring, on the
+      // phone's default sound.
+    }
   }
 
   CategoryTheme get _theme => CategoryTheme.of(
@@ -654,7 +690,10 @@ class _ReminderEditorScreenState extends State<ReminderEditorScreen> {
                     : tone[0].toUpperCase() + tone.substring(1),
                 selected: _ringtone == tone,
                 accent: theme.accent,
-                onTap: () => setState(() => _ringtone = tone),
+                onTap: () {
+                  setState(() => _ringtone = tone);
+                  _playTone(tone);
+                },
                 expand: false,
               ),
           ],

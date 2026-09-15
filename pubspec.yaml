@@ -49,6 +49,10 @@ dependencies:
   file_picker: 8.3.7
   url_launcher: ^6.3.2
 
+  # Previewing a reminder tone in the editor. Only ever plays a bundled asset —
+  # the notification itself is sounded by the OS from res/raw, not from here.
+  audioplayers: ^6.8.1
+
   # Voice notes.
   #
   # record captures and reports the input level for the live
@@ -181,6 +185,12 @@ flutter:
     - assets/icons/
     # Not covered by the line above: asset directories are not recursive.
     - assets/icons/services/
+
+    # Reminder tones. The same .wav files also live in
+    # android/app/src/main/res/raw/ — an Android notification channel can only
+    # take its sound from a raw resource, and Dart can only read an asset, so
+    # each tone has to exist in both places. Keep the two folders identical.
+    - assets/tones/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
